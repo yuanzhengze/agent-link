@@ -73,8 +73,12 @@ func (h *Hub) unregister(c *conn) {
 }
 
 // Broadcast JSON-encodes ev and writes it to every connection currently
-// subscribed to project. A write failure on one connection unregisters and
-// closes it but does not stop delivery to the others.
+// subscribed to project. Writes fan out one goroutine per connection so a
+// single slow/dead subscriber (each write is bounded by wsWriteTimeout, but
+// sequential writes would still serialize delay across subscribers) cannot
+// delay delivery to the others; Broadcast itself does not block on WS I/O.
+// A write failure on one connection unregisters and closes it but does not
+// stop delivery to the others.
 func (h *Hub) Broadcast(project string, ev Event) {
 	data, err := json.Marshal(ev)
 	if err != nil {
@@ -89,13 +93,14 @@ func (h *Hub) Broadcast(project string, ev Event) {
 	h.mu.RUnlock()
 
 	for _, c := range conns {
-		ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
-		err := c.ws.Write(ctx, websocket.MessageText, data)
-		cancel()
-		if err != nil {
-			h.unregister(c)
-			c.ws.CloseNow()
-		}
+		go func(c *conn) {
+			ctx, cancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+			defer cancel()
+			if err := c.ws.Write(ctx, websocket.MessageText, data); err != nil {
+				h.unregister(c)
+				c.ws.CloseNow()
+			}
+		}(c)
 	}
 }
 
