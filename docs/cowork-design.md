@@ -35,7 +35,7 @@ agentlink 已经解决了"跨设备 Agent 通信"（消息 / 任务 / 在线状�
 |------|------|------|
 | 协作对象 | 一套前端**代码文件**（静态 HTML/CSS/JS） | PM 直接写 HTML，本地跑即原型，零构建 |
 | 拓扑 | **本地工作副本 + 服务器唯一真相 + 文件锁 + 秒级同步** | 与 agentlink"每设备本地跑 Agent + 中心协调"天然契合 |
-| 同步底座 | **git 存历史/权威 + WebSocket 负责秒级广播**（混合） | git 白送历史/回滚/成熟合并；WS 让传播达秒级 |
+| 同步底座 | **服务器唯一 git 提交者 + HTTP 写入(`apply`) + WebSocket 推内容** | git（仅服务器侧）白送历史/回滚；WS 让传播达秒级；客户端免 git、复用 Bearer 鉴权 |
 | 锁粒度 | **按文件**（`project:path`） | 防同文件覆盖；不同文件全并行 |
 | 锁获取 | **分层**：Agent 主动抢锁为主 + push 时服务器强制校验为底 + GUI/人工接管为辅 + 租约过期 | 强制校验绕不过；Agent 抢锁贴合其工作方式 |
 | 复用 agentlink | 服务端 / Redis / 身份 / 鉴权 / 在线 / 消息 / 任务 全部复用 | 不重复造轮子 |
@@ -44,7 +44,7 @@ agentlink 已经解决了"跨设备 Agent 通信"（消息 / 任务 / 在线状�
 
 - 锁是**按文件**的：改**不同文件**的 Agent 完全并行；只有抢**同一文件**才排队。
 - 同一文件写入串行**正是防覆盖的手段**；替代方案（实时合并）会把两套矛盾改动缝成谁都不要的结果，退回到静默覆盖。
-- **锁只管"写"，不管"读"**：预览是读路径，锁从不阻塞预览或其他文件。持锁者自己每次保存都会 push，其进度也秒级可见。因此**写入按文件串行**与**预览全程秒级**互不冲突。
+- **锁只管"写"，不管"读"**：预览是读路径，锁从不阻塞预览或其他文件。持锁者自己每次保存都会提交，其进度也秒级可见。因此**写入按文件串行**与**预览全程秒级**互不冲突。
 
 ## 4. 总体架构
 
@@ -56,7 +56,7 @@ agentlink 已经解决了"跨设备 Agent 通信"（消息 / 任务 / 在线状�
  │ coding 工具  │◀─tmux──│                          │  锁/状态/队列 │            │
  │ (Cursor等)   │         │  【新】锁服务  ─────────▶│              │            │
  │ 本地工作副本 │◀──────▶ │  【新】WebSocket Hub      └──────────────┘            │
- │ 【新】sync   │  git    │  【新】Git 权威仓库 (每项目一个 bare repo + 工作树)   │
+ │ 【新】sync   │  HTTP   │  【新】Git 权威仓库 (每项目一个 repo；服务器唯一提交者)│
  │   daemon    │  +WS    │  【新】预览静态托管 (注入 live-reload)                │
  └─────────────┘         │  【新】Web GUI                                        │
    PM-B / PM-C ...       └──────────────────────────────────────────────────────┘
@@ -67,8 +67,9 @@ agentlink 已经解决了"跨设备 Agent 通信"（消息 / 任务 / 在线状�
 | 组件 | 职责 | 依赖 |
 |------|------|------|
 | 锁服务 | 按 `project:path` 原子获取/释放/续租/过期 | Redis |
-| Git 权威仓库 | 每项目一个 bare repo（真相+历史）+ 签出工作树供预览 | 磁盘、git CLI |
-| WebSocket Hub | 秒级广播 `file_changed / lock_changed / presence / conflict` | Redis pub/sub（可选）、内存连接表 |
+| Git 权威仓库 | 每项目一个 repo（真相+历史，**服务器是唯一提交者**）+ 工作树供预览 | 磁盘、git CLI |
+| 写入服务（apply） | 校验持锁后，串行把文件内容落到工作树并 commit，广播变更 | 锁服务、Git 权威仓库、WS Hub |
+| WebSocket Hub | 秒级广播 `file_changed`（含内容）`/ lock_changed / presence / conflict` | 内存连接表 |
 | 预览静态托管 | 把项目工作树按 URL 托管，注入 live-reload 脚本 | Git 工作树、WS Hub |
 | Web GUI | 项目列表 + 项目视图（预览/文件树+锁/在线/冲突） | 上述 REST + WS |
 
@@ -76,15 +77,15 @@ agentlink 已经解决了"跨设备 Agent 通信"（消息 / 任务 / 在线状�
 
 | 组件 | 职责 |
 |------|------|
-| sync daemon (`agentlink sync`) | 监听本地副本→校验持锁+基线最新→commit→push；订阅 WS→pull 别人的改动；仿 poller 常驻 |
+| sync daemon (`agentlink sync`) | 监听本地副本→校验持锁→`POST /apply` 上传改动；订阅 WS→把别人的改动写回本地；仿 poller 常驻。**客户端不使用 git** |
 | `agentlink lock` 命令 | acquire / release / list；Agent（经 CLAUDE.md 规则）和人都用 |
 
 ## 5. 复用 agentlink 的点
 
-- **鉴权与身份**：`device:session` + Bearer API key（`authMiddleware`）。锁归属直接用它。
+- **鉴权与身份**：`device:session` + Bearer API key（`authMiddleware`）。锁归属与 `apply` 写入者身份直接用它。
 - **原子锁写法**：照 `taskSendScript` 的 Lua"占用检查"模式，改造成按文件锁。
 - **冲突返回**：锁被占的 409 照 `writeBusyError` 模式，返回当前持锁者信息。
-- **消息注入**：抢锁失败 / 版本冲突时，用 agentlink 消息系统自动通知对应 Agent。
+- **消息注入**：抢锁失败 / 越权写被拒时，用 agentlink 消息系统自动通知对应 Agent。
 - **在线状态**：GUI 的在线/状态面板复用 `GET /agents/list` 的 `current` 字段。
 - **心跳**：锁租约的续租搭 agentlink 心跳（~60s）。
 
@@ -108,11 +109,11 @@ agentlink:projects                     Set   所有 project id（列表页用）
 ### 磁盘
 
 ```
-<data>/repos/<id>.git      bare 权威仓库（push 目标 + 历史）
-<data>/work/<id>/          签出工作树（预览托管的根；push 后服务器更新它）
+<data>/work/<id>/          项目工作树 = 预览托管的根，同时是一个 git 仓库
+                           （服务器在此 add+commit；.git 即权威历史）
 ```
 
-规模 ≤5 项目 ≤10 人：单机、单 Redis、本地 git 足够，无需分片。
+服务器是**唯一提交者**：`apply` 落盘到 `work/<id>/` 后就地 `git commit`，历史/回滚/diff 都在这个仓库的 `.git` 里。客户端不建 clone、不用 git。规模 ≤5 项目 ≤10 人：单机、单 Redis、本地 git 足够，无需分片。
 
 ## 7. 核心流程
 
@@ -121,21 +122,21 @@ agentlink:projects                     Set   所有 project id（列表页用）
 ```
 1. Agent 要改 index.html → 按 CLAUDE.md 规则先 `agentlink lock acquire proj1 index.html`
 2. 锁服务原子判断：空闲→授予(写 Redis+租约)；被占→返回持锁者，Agent 转去改别的或等待
-   授予成功后，daemon 先 git pull 保证本地该文件是最新（此后独占，别人改不了它）
+   （拿到锁后即独占该文件，别人改不了它，故其内容恒为最新）
 3. Agent 改本地 index.html
-4. sync daemon 侦测变化 → git commit → push 到服务器
-5. 服务器接收 push：校验"改动的所有路径都被本 session 持锁"→ 合并进权威分支
-   （因锁独占，各人改动路径互不相交，合并必然无冲突）→ 更新 work/<id>/、head_commit、WS 广播 file_changed
-6. 其他设备 daemon 收 WS → git pull 同步（同样因路径不相交，pull 必然干净）；GUI 刷新预览与状态
+4. sync daemon 侦测变化 → `POST /apply { project, path, content }`（Bearer 鉴权=身份）
+5. 服务器 apply：拿项目内存互斥锁 → 校验"path 被本 session 持锁" →
+   写 work/<id>/index.html → git add+commit → 释放互斥锁 → WS 广播 file_changed（含内容）
+6. 其他设备 daemon 收 WS → 直接把内容写回本地对应文件；GUI 刷新预览与状态
 7. Agent 改完 → `agentlink lock release`（或任务结束/租约过期自动释放）
 ```
 
-**为何并行推送不同文件不会互相拒绝**：客户端不要求 push 是 fast-forward。服务器在接收侧做校验 + 合并——只要改动路径都在推送者持有的锁内，而锁又是独占的，任意两次并发推送触及的路径必然**不相交**，因此合并（和其他人的 pull）**永远干净**、无需人工解决。
+**为何并发写不同文件永不冲突**：服务器是唯一提交者，`apply` 由项目级内存互斥锁串行执行；每次 commit 只触及"调用方持锁"的路径，而锁独占 ⇒ 并发的两次 apply 路径必然**不相交**，顺序落盘即可，从不需要三方合并。
 
 ### 7.2 锁的三层防线
 
 - **主（Agent 主动抢锁）**：`lock acquire` + 在注入的 `CLAUDE.md` 写明"改任何文件前先抢锁、改完释放"。
-- **底（push 时强制校验）**：无论锁怎么来，push 时服务器校验"持有这些文件锁 + 基线版本最新"，不满足即拒绝。这一层保证绕不过去。
+- **底（apply 时强制校验）**：无论锁怎么来，`POST /apply` 时服务器校验"调用方持有该文件锁"，不满足即拒绝。这一层保证绕不过去。
 - **辅（GUI 可视化 + 人工接管）**：谁锁了哪些文件一目了然；PM 可手动占用、或 Agent 卡死时抢锁/强制释放。
 - **租约过期**：持锁者掉线/长时间空闲 → 锁自动过期可回收；GUI 显示"陈旧锁，是否接管"。
 
@@ -150,18 +151,19 @@ agentlink:projects                     Set   所有 project id（列表页用）
 | 冲突类型 | 触发 | 处理 |
 |----------|------|------|
 | 锁冲突 | 抢锁时文件已被占 | 返回 409 + 持锁者；Agent 换文件或等；可选注入消息提醒 |
-| 越权写（兜底） | push 里含**未持锁**的路径（绕过锁直接改，或锁被接管后仍在改） | 服务器**拒绝整个 push**；daemon 把本地改动 stash → pull 最新 → GUI 弹告警 + 注入消息，让 Agent 先抢锁再基于最新重做 |
+| 越权写（兜底） | `apply` 的 path **未被调用方持锁**（绕过抢锁，或锁被接管后仍在写） | 服务器 **拒绝该 apply（409）**；daemon 保留本地改动、GUI 弹告警 + 注入消息，让 Agent 先抢锁；若期间该文件已被别人改，daemon 先把服务器最新内容写回本地供 Agent 基于最新重做 |
 | 陈旧锁 | 持锁者掉线/超时空闲 | 锁租约过期可回收；GUI 提示接管 |
 
-正常流程里**不存在"版本冲突"**：持锁者在 acquire 时已 pull 到最新，且持锁期间该文件独占、无人能改，故其基线恒为最新。只有绕过锁（越权写）或锁被接管后仍继续写，才会触发上面的兜底路径。
+正常流程里**不存在"版本冲突"**：持锁期间该文件独占、无人能改，其内容恒为最新。只有绕过锁（越权写）或锁被接管后仍继续写，才会触发上面的兜底路径。
 
-## 9. 同步机制（git + WebSocket 混合）
+## 9. 同步机制（服务器唯一提交者 + HTTP写入 + WebSocket 推内容）
 
-- **git = 权威 + 历史**：每项目一个服务器 bare repo；客户端本地是它的 clone。写入通过 `git push`，落到权威 repo。历史/回滚/diff 白送。
-- **接收侧合并（非 fast-forward 要求）**：客户端各自基于本地 HEAD 提交并 push；服务器在接收侧校验"改动路径 ⊆ 推送者持锁"后，把提交**合并**进权威分支。因锁独占 ⇒ 并发推送路径不相交 ⇒ 合并恒无冲突。
-- **WebSocket = 秒级传播**：合并落库后服务器广播 `file_changed`（含新 `head_commit`）；各 daemon 收到后 `git pull` 同步（同样恒干净）。避免"定时轮询"的秒级延迟。
-- **push 鉴权与校验**：git 走 HTTP（git-http-backend 或自建代理），复用 agentlink 的 Bearer API key；"改动路径 ⊆ 持锁"的校验在 pre-receive 钩子或代理层执行，不满足则拒收。
-- **daemon 侦测**：文件系统 watch（fsnotify）；防抖后 commit+push。
+- **git = 权威 + 历史（仅服务器侧）**：每项目 `work/<id>/` 就是一个 git 仓库；服务器在 `apply` 时就地 `git add+commit`。历史/回滚/diff 全在这个仓库，客户端不碰 git。
+- **写入走 HTTP `POST /apply`**：客户端上传 `{ project, path, content }`；服务器拿**项目级内存互斥锁**串行处理——校验"path 被调用方持锁"→ 写工作树 → commit → 广播。复用 agentlink 的 Bearer API key 鉴权，无需 git-over-HTTP 那套凭据管线。
+- **WebSocket = 秒级传播**：commit 后服务器广播 `file_changed`（含 path + 新内容 + 新 `head_commit`）；各 daemon 收到后**直接把内容写回本地文件**，无 fetch 往返。
+- **首次进入**：daemon 启动时 `GET /projects/{id}/snapshot` 拉取全量文件内容写到本地工作副本。
+- **daemon 侦测**：文件系统 watch（fsnotify）；防抖后对每个变更文件调 `apply`（前提是本 session 已持该文件锁，否则先 `lock acquire`）。
+- **并发保证**：唯一提交者 + 互斥锁 + 锁独占 ⇒ 并发 apply 路径不相交，顺序落盘恒无冲突（见 §7.1）。
 
 ## 10. GUI（v1）
 
@@ -179,14 +181,15 @@ agentlink:projects                     Set   所有 project id（列表页用）
 ### 新增 HTTP 端点
 
 ```
-POST   /projects                创建项目（建 bare repo + 工作树 + Redis 记录）
+POST   /projects                创建项目（git init 工作树 + 首次 commit + Redis 记录）
 GET    /projects                列出项目
 GET    /projects/{id}/tree      文件树 + 每文件锁状态
+GET    /projects/{id}/snapshot  全量文件内容（daemon 首次进入拉取）
+POST   /projects/{id}/apply     { path, content } → 校验持锁→写工作树→commit→广播；越权 409
 POST   /locks/acquire           { project, path } → 200 授予 / 409 被占(+owner)
 POST   /locks/release           { project, path }
 GET    /locks/list?project=     该项目所有锁
 GET    /ws                      WebSocket（订阅项目事件）
-(git)  /git/<id>.git/...        git-http-backend / 代理（push 处插锁+版本校验）
 (静态) /preview/<id>/...        预览托管 + 注入 live-reload
 ```
 
@@ -207,18 +210,18 @@ agentlink sync <project>          # 常驻守护，仿 poller
 
 ## 12. 技术选型
 
-- **后端**：扩展现有 Go 服务（`net/http` + `go-redis`）。WebSocket 用 `coder/websocket`。git 用 `git` 命令行（`os/exec`）。
+- **后端**：扩展现有 Go 服务（`net/http` + `go-redis`）。WebSocket 用 `coder/websocket`。git 仅**服务器侧**用 `git` 命令行（`os/exec`）。
 - **GUI**：原生 JS / 极轻量，Go 直接托管，避免构建（贴合"少构建"理念）。
-- **客户端 daemon**：Go，`fsnotify` 监听，仿 poller 常驻。
+- **客户端 daemon**：Go，`fsnotify` 监听，仿 poller 常驻；只用 HTTP + WS，不依赖 git。
 
 ## 13. 组件边界与可测试性
 
 每个单元有单一职责、清晰接口，可独立测试：
 
 - **锁服务**：纯函数式判定（acquire/release/expire）+ Redis Lua；可用 miniredis 或真实 Redis 集成测。
-- **Git 权威层**：封装 bare repo 初始化、push 接收校验、工作树更新；可用临时目录测。
+- **Git 权威层**：封装 `git init` 工作树、apply（校验持锁→写→commit）、snapshot/tree 读取；可用临时目录测。
 - **WS Hub**：连接注册 + 广播；可用内存连接 mock 测。
-- **sync daemon**：watch→commit→push 状态机；可注入假 watcher / 假 git 测。
+- **sync daemon**：watch→apply / 收 WS→写回 状态机；可注入假 watcher / 假 HTTP 测。
 - **GUI**：与后端通过 REST/WS 契约解耦。
 
 ## 14. 并发瓶颈与未来区域锁
@@ -229,7 +232,7 @@ agentlink sync <project>          # 常驻守护，仿 poller
 
 ## 15. 术语
 
-- **device:session**：agentlink 的身份单元，一个设备上的一个 Agent 会话（如 `bob-pc:main`）。锁的归属者。
-- **权威 repo**：服务器上每项目的 bare git 仓库，唯一真相。
-- **工作树**：服务器上该项目的签出目录，预览托管的根。
+- **device:session**：agentlink 的身份单元，一个设备上的一个 Agent 会话（如 `bob-pc:main`）。锁的归属者、apply 的写入者。
+- **工作树 / 权威 repo**：服务器上每项目的 `work/<id>/` 目录，本身是 git 仓库；服务器是唯一提交者，`.git` 即权威历史。预览也托管这个目录。
+- **apply**：客户端把单个文件的新内容提交给服务器的写入操作（`POST /projects/{id}/apply`），服务器校验持锁后串行落盘并广播。
 - **租约（lease）**：锁的有效期，靠心跳续租；过期即可回收。
