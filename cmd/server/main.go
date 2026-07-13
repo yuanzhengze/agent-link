@@ -27,7 +27,12 @@ func main() {
 		addr = ":8080"
 	}
 
-	srv := api.New(addr, rdb, cfg.RegisterPassword)
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "./data"
+	}
+
+	srv := api.New(addr, dataDir, rdb, cfg.RegisterPassword)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

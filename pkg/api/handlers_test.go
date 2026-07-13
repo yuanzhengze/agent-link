@@ -17,6 +17,7 @@ import (
 
 var testRdb *redis.Client
 var ts *httptest.Server
+var testDataDir string
 
 func TestMain(m *testing.M) {
 	rdb, err := redis.NewClient("localhost:6379")
@@ -28,20 +29,27 @@ func TestMain(m *testing.M) {
 
 	cleanupTestData()
 
-	srv := New("", rdb, "test-password")
+	testDataDir, err = os.MkdirTemp("", "agentlink-api-test-")
+	if err != nil {
+		fmt.Println("failed to create temp data dir:", err)
+		os.Exit(1)
+	}
+
+	srv := New("", testDataDir, rdb, "test-password")
 	ts = httptest.NewServer(srv.authMiddleware(srv.mux))
 
 	code := m.Run()
 
 	ts.Close()
 	cleanupTestData()
+	os.RemoveAll(testDataDir)
 	rdb.Close()
 	os.Exit(code)
 }
 
 func cleanupTestData() {
 	ctx := context.Background()
-	for _, pattern := range []string{"agentlink:device:*", "agentlink:api_key:*", "agentlink:inbox:*", "agentlink:task:*", "agentlink:tasks:*"} {
+	for _, pattern := range []string{"agentlink:device:*", "agentlink:api_key:*", "agentlink:inbox:*", "agentlink:task:*", "agentlink:tasks:*", "agentlink:project:*", "agentlink:projects"} {
 		keys, _ := testRdb.Keys(ctx, pattern).Result()
 		if len(keys) > 0 {
 			testRdb.Del(ctx, keys...)

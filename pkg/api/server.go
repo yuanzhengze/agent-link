@@ -17,19 +17,23 @@ const (
 type Server struct {
 	rdb              *redis.Client
 	registerPassword string
+	dataDir          string
 	mux              *http.ServeMux
 	srv              *http.Server
 }
 
-func New(addr string, rdb *redis.Client, registerPassword string) *Server {
+func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Server {
 	s := &Server{
 		rdb:              rdb,
 		registerPassword: registerPassword,
+		dataDir:          dataDir,
 		mux:              http.NewServeMux(),
 	}
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.mux.HandleFunc("POST /agents/register", s.handleRegister)
+	s.mux.HandleFunc("POST /projects", s.handleCreateProject)
+	s.mux.HandleFunc("GET /projects", s.handleListProjects)
 	s.mux.HandleFunc("POST /messages/send", s.handleSend)
 	s.mux.HandleFunc("GET /inbox/pull", s.handlePull)
 	s.mux.HandleFunc("POST /tasks/send", s.handleSendTask)
