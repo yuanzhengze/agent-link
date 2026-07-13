@@ -233,6 +233,54 @@ func TestApply_pathTraversal_400(t *testing.T) {
 	}
 }
 
+func TestApply_gitDirTraversal_400(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "apply-owner-git")
+	projectID := createTestProject(t, apiKey, "apply-test-git")
+
+	cases := []string{
+		".git/hooks/pre-commit",
+		".GIT/hooks/pre-commit",
+		".Git/config",
+		"x/.Git/y",
+	}
+	for _, path := range cases {
+		t.Run(path, func(t *testing.T) {
+			resp, m := doApply(t, apiKey, projectID, "main", path, "malicious")
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected 400 for path %q, got %d, body=%+v", path, resp.StatusCode, m)
+			}
+
+			// The rejected write must not land in the real .git directory.
+			// Some targets (e.g. .git/config) pre-exist from `git init`,
+			// so assert on content rather than mere existence: the
+			// malicious payload must never appear there.
+			dir := filepath.Join(testDataDir, "work", projectID)
+			if data, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(path))); err == nil {
+				if string(data) == "malicious" {
+					t.Errorf("expected %q to not have been overwritten with malicious content", path)
+				}
+			}
+		})
+	}
+}
+
+func TestApply_absolutePath_400(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "apply-owner-abs")
+	projectID := createTestProject(t, apiKey, "apply-test-abs")
+
+	resp, m := doApply(t, apiKey, projectID, "main", "/etc/passwd", "malicious")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d, body=%+v", resp.StatusCode, m)
+	}
+
+	if _, err := os.Stat("/etc/passwd"); err == nil {
+		data, readErr := os.ReadFile("/etc/passwd")
+		if readErr == nil && strings.Contains(string(data), "malicious") {
+			t.Fatal("expected /etc/passwd to be untouched")
+		}
+	}
+}
+
 func TestApply_concurrentDifferentFiles(t *testing.T) {
 	apiKeyA := registerProjectTestDevice(t, "apply-owner-5a")
 	apiKeyB := registerProjectTestDevice(t, "apply-owner-5b")

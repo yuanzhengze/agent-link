@@ -59,6 +59,9 @@ func safeApplyPath(projectDir, path string) (string, error) {
 		return "", errors.New("path must not be absolute")
 	}
 	clean := filepath.Clean(path)
+	if clean == "." {
+		return "", errors.New("path must not be empty")
+	}
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.IsAbs(clean) {
 		return "", errors.New("path escapes project directory")
 	}
@@ -68,8 +71,18 @@ func safeApplyPath(projectDir, path string) (string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", errors.New("path escapes project directory")
 	}
-	if rel == ".git" || strings.HasPrefix(rel, ".git"+string(filepath.Separator)) {
-		return "", errors.New("path must not target the .git directory")
+	if rel == "." {
+		return "", errors.New("path must not be empty")
+	}
+	// Reject any path segment that is ".git" case-insensitively: on
+	// case-insensitive filesystems (macOS APFS, Windows NTFS) a segment
+	// like ".GIT" or ".Git" resolves to the same on-disk directory as
+	// ".git", which would otherwise let a client overwrite files such as
+	// .git/hooks/pre-commit and gain code execution on the next commit.
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		if strings.EqualFold(seg, ".git") {
+			return "", errors.New("path must not target the .git directory")
+		}
 	}
 
 	return full, nil
