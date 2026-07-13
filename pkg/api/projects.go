@@ -193,6 +193,9 @@ func listProjectFiles(dir string) ([]string, error) {
 			return nil
 		}
 		if !d.Type().IsRegular() {
+			// Non-regular entries (symlinks, sockets, devices, etc.) are
+			// intentionally skipped: following a symlink here could walk
+			// or read outside the project's work tree.
 			return nil
 		}
 		rel, err := filepath.Rel(dir, p)
@@ -258,6 +261,15 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
+
+	// Hold the same per-project mutex handleApply uses around its
+	// write+commit+HSet head_commit, spanning both the head_commit read
+	// and the file walk/reads below. Without this, a concurrent apply can
+	// land in the gap and produce a snapshot whose head_commit doesn't
+	// match the returned file bytes (or a read mid-write).
+	mu := s.projectLock(id)
+	mu.Lock()
+	defer mu.Unlock()
 
 	headCommit, err := s.rdb.HGet(r.Context(), projectKey, "head_commit").Result()
 	if err != nil {
