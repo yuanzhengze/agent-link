@@ -87,7 +87,7 @@ git CLI 为系统依赖（仅服务器需要）。
 
 ## 任务清单（按依赖顺序）
 
-### 任务 1：项目模型 + git init 工作树
+### Task 1 — 项目模型 + git init 工作树
 
 **文件**：`pkg/api/projects.go`（新）、`pkg/api/server.go`（路由 + `dataDir` 字段）、`cmd/server/main.go`（`DATA_DIR` 环境变量）
 
@@ -128,7 +128,7 @@ GET  /projects   → 200 {projects:[{id,name,created_at,head_commit}]}
 
 ---
 
-### 任务 2：文件锁服务
+### Task 2 — 文件锁服务
 
 **文件**：`pkg/api/locks.go`（新）、`pkg/api/server.go`（路由）
 
@@ -195,7 +195,7 @@ GET  /locks/list?project=<id>                                 → 200 {locks:[{p
 
 ---
 
-### 任务 3：apply 写入服务
+### Task 3 — apply 写入服务
 
 **文件**：`pkg/api/apply.go`（新）、`pkg/api/server.go`（路由 + 项目互斥锁 map）
 
@@ -244,7 +244,7 @@ POST /projects/{id}/apply  body {session, path, content} → 200 {head_commit} /
 
 ---
 
-### 任务 4：WebSocket Hub + 事件广播
+### Task 4 — WebSocket Hub + 事件广播
 
 **文件**：`pkg/api/ws.go`（新，实现任务 3 的 `Broadcaster`）、`pkg/api/server.go`（路由 + `s.hub = NewHub()`，注入 apply）
 
@@ -274,7 +274,7 @@ func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) // 接受连接�
 
 ---
 
-### 任务 5：文件树 + 快照 API
+### Task 5 — 文件树 + 快照 API
 
 **文件**：`pkg/api/projects.go`（追加两个 handler）、`server.go`（路由）
 
@@ -295,7 +295,7 @@ GET /projects/{id}/snapshot → 200 {head_commit, files:[{path, content}]}
 
 ---
 
-### 任务 6：静态预览托管 + live-reload 注入
+### Task 6 — 静态预览托管 + live-reload 注入
 
 **文件**：`pkg/api/preview.go`（新）、`server.go`（路由 `/preview/{id}/`）
 
@@ -323,7 +323,7 @@ ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==='file_changed'
 
 ---
 
-### 任务 7：CLI net 客户端 + project/lock 子命令
+### Task 7 — CLI net 客户端 + project/lock 子命令
 
 **文件**：`pkg/cli/net/projects.go`、`pkg/cli/net/locks.go`（新，复用 `apiDo`）、`cmd/agentlink/main.go`（`cmdProject`/`cmdLock` + usage）
 
@@ -346,7 +346,7 @@ agentlink lock list <project>
 
 ---
 
-### 任务 8：CLAUDE.md 注入锁规则
+### Task 8 — CLAUDE.md 注入锁规则
 
 **文件**：`pkg/adapter/claude.go`（`InitTemplate` 追加）
 
@@ -366,7 +366,7 @@ agentlink lock list <project>
 
 ---
 
-### 任务 9：sync daemon（agentlink sync）
+### Task 9 — sync daemon（agentlink sync）
 
 **文件**：`pkg/cli/runtime/sync.go`（新）、`cmd/agentlink/main.go`（`cmdSync`）
 
@@ -398,7 +398,7 @@ func RunSync(cfg Config, creds Creds, project, localDir, session string) error
 
 ---
 
-### 任务 10：Web GUI
+### Task 10 — Web GUI
 
 **文件**：`web/index.html`、`web/app.js`、`web/style.css`（新）、`server.go`（`embed` 托管 `/`）
 
@@ -420,7 +420,7 @@ func RunSync(cfg Config, creds Creds, project, localDir, session string) error
 
 ---
 
-### 任务 11：端到端集成 + 文档
+### Task 11 — 端到端集成 + 文档
 
 **文件**：`pkg/api/e2e_test.go`（新）、`README.md` / `README_zh.md`（追加 cowork 用法）
 
