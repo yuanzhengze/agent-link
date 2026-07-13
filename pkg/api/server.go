@@ -56,6 +56,8 @@ func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Serv
 	s.mux.HandleFunc("POST /locks/release", s.handleLockRelease)
 	s.mux.HandleFunc("GET /locks/list", s.handleLockList)
 	s.mux.HandleFunc("POST /projects/{id}/apply", s.handleApply)
+	s.mux.HandleFunc("GET /projects/{id}/tree", s.handleTree)
+	s.mux.HandleFunc("GET /projects/{id}/snapshot", s.handleSnapshot)
 
 	hub := NewHub(rdb)
 	s.hub = hub

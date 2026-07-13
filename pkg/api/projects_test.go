@@ -199,3 +199,216 @@ func TestListProjects(t *testing.T) {
 		}
 	}
 }
+
+func doTree(t *testing.T, apiKey, project string) (*http.Response, map[string]any) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", ts.URL+"/projects/"+project+"/tree", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.NewDecoder(resp.Body).Decode(&m)
+	resp.Body.Close()
+	return resp, m
+}
+
+func doSnapshot(t *testing.T, apiKey, project string) (*http.Response, map[string]any) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", ts.URL+"/projects/"+project+"/snapshot", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	json.NewDecoder(resp.Body).Decode(&m)
+	resp.Body.Close()
+	return resp, m
+}
+
+// treeFilesByPath decodes a tree response's "files" array into a map keyed
+// by path, for convenient per-file assertions.
+func treeFilesByPath(t *testing.T, m map[string]any) map[string]map[string]any {
+	t.Helper()
+	raw, _ := m["files"].([]any)
+	out := make(map[string]map[string]any, len(raw))
+	for _, f := range raw {
+		fm, ok := f.(map[string]any)
+		if !ok {
+			t.Fatalf("expected file entry to be an object, got %T (%v)", f, f)
+		}
+		path, _ := fm["path"].(string)
+		out[path] = fm
+	}
+	return out
+}
+
+func TestTree_listsFilesWithLocks(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "tree-owner-1")
+	projectID := createTestProject(t, apiKey, "tree-test-1")
+
+	t.Cleanup(func() {
+		ctx := context.Background()
+		testRdb.Del(ctx, "agentlink:lock:"+projectID+":page.html")
+		testRdb.Del(ctx, "agentlink:lock:"+projectID+":about.html")
+		testRdb.Del(ctx, "agentlink:locks:tree-owner-1:main")
+	})
+
+	// page.html: lock acquired and never released -> still held at tree time.
+	respAcq1, _ := doLockAcquire(t, apiKey, projectID, "main", "page.html", "")
+	if respAcq1.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 acquiring lock on page.html, got %d", respAcq1.StatusCode)
+	}
+	respApply1, _ := doApply(t, apiKey, projectID, "main", "page.html", "<h1>page</h1>")
+	if respApply1.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 applying page.html, got %d", respApply1.StatusCode)
+	}
+
+	// about.html: lock acquired, applied, then released -> free at tree time.
+	respAcq2, _ := doLockAcquire(t, apiKey, projectID, "main", "about.html", "")
+	if respAcq2.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 acquiring lock on about.html, got %d", respAcq2.StatusCode)
+	}
+	respApply2, _ := doApply(t, apiKey, projectID, "main", "about.html", "<h1>about</h1>")
+	if respApply2.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 applying about.html, got %d", respApply2.StatusCode)
+	}
+	respRel, _ := doLockRelease(t, apiKey, projectID, "main", "about.html", false)
+	if respRel.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 releasing lock on about.html, got %d", respRel.StatusCode)
+	}
+
+	resp, m := doTree(t, apiKey, projectID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%+v", resp.StatusCode, m)
+	}
+
+	byPath := treeFilesByPath(t, m)
+	wantOwner := "tree-owner-1:main"
+
+	seed, ok := byPath["index.html"]
+	if !ok {
+		t.Fatalf("expected index.html in tree, got %+v", byPath)
+	}
+	if locked, _ := seed["locked"].(bool); locked {
+		t.Errorf("expected index.html locked=false, got %v", seed["locked"])
+	}
+
+	page, ok := byPath["page.html"]
+	if !ok {
+		t.Fatalf("expected page.html in tree, got %+v", byPath)
+	}
+	if locked, _ := page["locked"].(bool); !locked {
+		t.Errorf("expected page.html locked=true, got %v", page["locked"])
+	}
+	if owner, _ := page["owner"].(string); owner != wantOwner {
+		t.Errorf("expected page.html owner=%s, got %v", wantOwner, page["owner"])
+	}
+
+	about, ok := byPath["about.html"]
+	if !ok {
+		t.Fatalf("expected about.html in tree, got %+v", byPath)
+	}
+	if locked, _ := about["locked"].(bool); locked {
+		t.Errorf("expected about.html locked=false, got %v", about["locked"])
+	}
+	if owner, _ := about["owner"].(string); owner != "" {
+		t.Errorf("expected about.html owner empty, got %v", about["owner"])
+	}
+}
+
+func TestTree_skipsGitDir(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "tree-owner-2")
+	projectID := createTestProject(t, apiKey, "tree-test-2")
+
+	resp, m := doTree(t, apiKey, projectID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%+v", resp.StatusCode, m)
+	}
+
+	byPath := treeFilesByPath(t, m)
+	for path := range byPath {
+		if path == ".git" || strings.HasPrefix(path, ".git/") {
+			t.Errorf("expected no .git paths in tree, found %q", path)
+		}
+	}
+}
+
+func TestSnapshot_returnsAllContents(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "snap-owner-1")
+	projectID := createTestProject(t, apiKey, "snap-test-1")
+
+	t.Cleanup(func() {
+		ctx := context.Background()
+		testRdb.Del(ctx, "agentlink:lock:"+projectID+":data.html")
+		testRdb.Del(ctx, "agentlink:locks:snap-owner-1:main")
+	})
+
+	respAcq, _ := doLockAcquire(t, apiKey, projectID, "main", "data.html", "")
+	if respAcq.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 acquiring lock on data.html, got %d", respAcq.StatusCode)
+	}
+	respApply, _ := doApply(t, apiKey, projectID, "main", "data.html", "<h1>data</h1>")
+	if respApply.StatusCode != http.StatusOK {
+		t.Fatalf("setup: expected 200 applying data.html, got %d", respApply.StatusCode)
+	}
+
+	resp, m := doSnapshot(t, apiKey, projectID)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%+v", resp.StatusCode, m)
+	}
+
+	headCommit, _ := m["head_commit"].(string)
+	if headCommit == "" {
+		t.Error("expected non-empty head_commit")
+	}
+
+	filesRaw, _ := m["files"].([]any)
+	byPath := make(map[string]string, len(filesRaw))
+	for _, f := range filesRaw {
+		fm, ok := f.(map[string]any)
+		if !ok {
+			t.Fatalf("expected file entry to be an object, got %T (%v)", f, f)
+		}
+		path, _ := fm["path"].(string)
+		content, _ := fm["content"].(string)
+		byPath[path] = content
+	}
+
+	dir := filepath.Join(testDataDir, "work", projectID)
+	onDisk, err := os.ReadFile(filepath.Join(dir, "data.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := byPath["data.html"]; !ok || got != string(onDisk) {
+		t.Errorf("expected data.html content=%q, got %q (present=%v)", string(onDisk), got, ok)
+	}
+
+	seedOnDisk, err := os.ReadFile(filepath.Join(dir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := byPath["index.html"]; !ok || got != string(seedOnDisk) {
+		t.Errorf("expected index.html content to match disk, got %q (present=%v)", got, ok)
+	}
+}
+
+func TestTree_missingProject_404(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "tree-owner-404")
+
+	resp, m := doTree(t, apiKey, "does-not-exist")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d, body=%+v", resp.StatusCode, m)
+	}
+}
+
+func TestSnapshot_missingProject_404(t *testing.T) {
+	apiKey := registerProjectTestDevice(t, "snap-owner-404")
+
+	resp, m := doSnapshot(t, apiKey, "does-not-exist")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d, body=%+v", resp.StatusCode, m)
+	}
+}

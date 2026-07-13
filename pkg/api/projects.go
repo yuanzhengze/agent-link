@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -155,4 +156,131 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, ListProjectsResponse{Projects: projects})
+}
+
+type TreeFileEntry struct {
+	Path   string `json:"path"`
+	Locked bool   `json:"locked"`
+	Owner  string `json:"owner"`
+}
+
+type TreeResponse struct {
+	Files []TreeFileEntry `json:"files"`
+}
+
+type SnapshotFileEntry struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+type SnapshotResponse struct {
+	HeadCommit string              `json:"head_commit"`
+	Files      []SnapshotFileEntry `json:"files"`
+}
+
+// listProjectFiles walks a project's work tree and returns the forward-slash
+// relative path of every regular file, skipping the .git directory entirely.
+func listProjectFiles(dir string) ([]string, error) {
+	var paths []string
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		paths = append(paths, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// handleTree lists every file in a project's work tree along with its
+// current lock status, for the GUI's file tree view.
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	exists, err := s.rdb.Exists(r.Context(), "agentlink:project:"+id).Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if exists == 0 {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	paths, err := listProjectFiles(s.projectDir(id))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to walk project directory")
+		return
+	}
+
+	files := make([]TreeFileEntry, 0, len(paths))
+	for _, rel := range paths {
+		owner, expired := s.lockOwner(r.Context(), id, rel)
+		files = append(files, TreeFileEntry{
+			Path:   rel,
+			Locked: owner != "" && !expired,
+			Owner:  owner,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, TreeResponse{Files: files})
+}
+
+// handleSnapshot returns the full content of every file in a project's work
+// tree plus the current head_commit, so a sync daemon can seed a client's
+// local copy on startup.
+func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	projectKey := "agentlink:project:" + id
+	exists, err := s.rdb.Exists(r.Context(), projectKey).Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if exists == 0 {
+		writeError(w, http.StatusNotFound, "project not found")
+		return
+	}
+
+	headCommit, err := s.rdb.HGet(r.Context(), projectKey, "head_commit").Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	dir := s.projectDir(id)
+	paths, err := listProjectFiles(dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to walk project directory")
+		return
+	}
+
+	files := make([]SnapshotFileEntry, 0, len(paths))
+	for _, rel := range paths {
+		content, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read file")
+			return
+		}
+		files = append(files, SnapshotFileEntry{Path: rel, Content: string(content)})
+	}
+
+	writeJSON(w, http.StatusOK, SnapshotResponse{HeadCommit: headCommit, Files: files})
 }
