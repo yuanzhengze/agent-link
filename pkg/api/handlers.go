@@ -1516,7 +1516,7 @@ func (s *Server) writeBusyError(w http.ResponseWriter, ctx context.Context, devi
 
 // skipAuth returns true if the path does not require API key auth.
 func skipAuth(path string) bool {
-	return path == "/health" || path == "/agents/register"
+	return path == "/health" || path == "/agents/register" || path == "/ws"
 }
 
 // authMiddleware wraps a handler, checking Bearer API key on protected routes.
