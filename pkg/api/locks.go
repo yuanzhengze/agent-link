@@ -26,6 +26,9 @@ local exp = tonumber(redis.call('HGET', KEYS[1], 'lease_expires_at') or '0')
 if cur and cur ~= ARGV[1] and exp > tonumber(ARGV[2]) then
   return {0, cur}                      -- held by someone else, not expired
 end
+if cur and cur ~= ARGV[1] then
+  redis.call('SREM', 'agentlink:locks:' .. cur, ARGV[4])  -- reclaim: clean old owner's set
+end
 redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'acquired_at', ARGV[2],
   'lease_expires_at', ARGV[3], 'task_id', ARGV[5])
 redis.call('SADD', KEYS[2], ARGV[4])
@@ -41,7 +44,7 @@ const lockReleaseScript = `
 local cur = redis.call('HGET', KEYS[1], 'owner')
 if cur == false then return {1, ''} end
 if cur ~= ARGV[1] and ARGV[3] ~= '1' then return {0, cur} end
-redis.call('DEL', KEYS[1]); redis.call('SREM', KEYS[2], ARGV[2])
+redis.call('DEL', KEYS[1]); redis.call('SREM', 'agentlink:locks:' .. cur, ARGV[2])
 return {1, ''}
 `
 

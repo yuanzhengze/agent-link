@@ -174,6 +174,22 @@ func TestLockAcquire_expired_reclaim(t *testing.T) {
 	if lr2.Owner != wantOwner {
 		t.Errorf("expected owner=%s, got %s", wantOwner, lr2.Owner)
 	}
+
+	oldIsMember, err := testRdb.SIsMember(ctx, "agentlink:locks:lock-d:main", "proj4|file4.html").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oldIsMember {
+		t.Error("expected member to be removed from old owner's locks set after reclaim")
+	}
+
+	newIsMember, err := testRdb.SIsMember(ctx, "agentlink:locks:lock-e:main", "proj4|file4.html").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !newIsMember {
+		t.Error("expected member to be present in new owner's locks set after reclaim")
+	}
 }
 
 func TestLockRelease_owner(t *testing.T) {
@@ -277,6 +293,14 @@ func TestLockRelease_force(t *testing.T) {
 	}
 	if exists != 0 {
 		t.Error("expected lock key to be deleted after forced release")
+	}
+
+	isMember, err := testRdb.SIsMember(ctx, "agentlink:locks:lock-i:main", "proj7|file7.html").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isMember {
+		t.Error("expected member to be removed from real owner's locks set after force release")
 	}
 }
 
