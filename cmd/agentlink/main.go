@@ -36,6 +36,10 @@ func main() {
 		cmdList(os.Args[2:])
 	case "session":
 		cmdSession(os.Args[2:])
+	case "project":
+		cmdProject(os.Args[2:])
+	case "lock":
+		cmdLock(os.Args[2:])
 	case "attach":
 		cmdAttach(os.Args[2:])
 	case "restart":
@@ -68,6 +72,11 @@ Usage:
   agentlink task status <task_id>
   agentlink task list
   agentlink session add|remove <name>
+  agentlink project create <name>
+  agentlink project list
+  agentlink lock acquire <project> <path>
+  agentlink lock release <project> <path>
+  agentlink lock list <project>
   agentlink attach <session>
   agentlink restart
   agentlink uninstall
@@ -342,6 +351,92 @@ func cmdSessionRemove(args []string) {
 	}
 	name := args[0]
 	if err := rt.RunSessionRemove(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdProject(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink project create|list [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "create":
+		cmdProjectCreate(args[1:])
+	case "list":
+		cmdProjectList()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown project subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdProjectCreate(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink project create <name>")
+		os.Exit(1)
+	}
+	name := args[0]
+	if err := api.RunProjectCreate(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdProjectList() {
+	if err := api.RunProjectList(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLock(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock acquire|release|list [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "acquire":
+		cmdLockAcquire(args[1:])
+	case "release":
+		cmdLockRelease(args[1:])
+	case "list":
+		cmdLockList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown lock subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdLockAcquire(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock acquire <project> <path>")
+		os.Exit(1)
+	}
+	if err := api.RunLockAcquire(args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLockRelease(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock release <project> <path>")
+		os.Exit(1)
+	}
+	if err := api.RunLockRelease(args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLockList(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock list <project>")
+		os.Exit(1)
+	}
+	if err := api.RunLockList(args[0]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
