@@ -49,6 +49,9 @@ func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Serv
 	s.mux.HandleFunc("DELETE /agents/sessions", s.handleDeleteSession)
 	s.mux.HandleFunc("DELETE /agents/device", s.handleDeleteDevice)
 	s.mux.HandleFunc("GET /whoami", s.handleWhoami)
+	s.mux.HandleFunc("POST /locks/acquire", s.handleLockAcquire)
+	s.mux.HandleFunc("POST /locks/release", s.handleLockRelease)
+	s.mux.HandleFunc("GET /locks/list", s.handleLockList)
 
 	return s
 }
