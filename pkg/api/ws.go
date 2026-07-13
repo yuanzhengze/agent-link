@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -26,6 +27,14 @@ type Hub struct {
 	rdb  *redis.Client
 	mu   sync.RWMutex
 	subs map[string]map[*conn]struct{} // project -> set of conns
+
+	// previewToken, if set, is a read-only token that authenticates a
+	// GET /ws subscription (subscribe-only; this handler never accepts
+	// writes) without granting access to write endpoints like /apply or
+	// /locks/acquire, which only accept real api_keys via authMiddleware.
+	// Set by New() (Task 6) after construction, so NewHub's signature and
+	// existing callers/tests are unaffected.
+	previewToken string
 }
 
 // conn wraps a *websocket.Conn with the project it's subscribed to, so
@@ -123,16 +132,22 @@ func (h *Hub) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sum := sha256.Sum256([]byte(token))
-	hashHex := hex.EncodeToString(sum[:])
-	_, err := h.rdb.Get(r.Context(), "agentlink:api_key:"+hashHex).Result()
-	if err == goredis.Nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+	// Accept either the server's read-only preview token (subscribe-only,
+	// injected into unauthenticated preview pages, Task 6) or a real
+	// api_key looked up the same way authMiddleware validates Bearer keys.
+	isPreviewToken := h.previewToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(h.previewToken)) == 1
+	if !isPreviewToken {
+		sum := sha256.Sum256([]byte(token))
+		hashHex := hex.EncodeToString(sum[:])
+		_, err := h.rdb.Get(r.Context(), "agentlink:api_key:"+hashHex).Result()
+		if err == goredis.Nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 
 	ws, err := websocket.Accept(w, r, nil)

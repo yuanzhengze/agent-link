@@ -1515,8 +1515,12 @@ func (s *Server) writeBusyError(w http.ResponseWriter, ctx context.Context, devi
 }
 
 // skipAuth returns true if the path does not require API key auth.
+// /preview/ is intentionally unauthenticated (v1, internal tool, <=10
+// users): the preview page is plain HTML loaded directly by a browser,
+// which cannot attach an Authorization header, and it carries no write
+// capability (see handlePreview / Hub.previewToken).
 func skipAuth(path string) bool {
-	return path == "/health" || path == "/agents/register" || path == "/ws"
+	return path == "/health" || path == "/agents/register" || path == "/ws" || strings.HasPrefix(path, "/preview/")
 }
 
 // authMiddleware wraps a handler, checking Bearer API key on protected routes.
