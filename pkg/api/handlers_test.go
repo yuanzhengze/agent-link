@@ -18,6 +18,7 @@ import (
 var testRdb *redis.Client
 var ts *httptest.Server
 var testDataDir string
+var testSrv *Server
 
 func TestMain(m *testing.M) {
 	rdb, err := redis.NewClient("localhost:6379")
@@ -36,6 +37,7 @@ func TestMain(m *testing.M) {
 	}
 
 	srv := New("", testDataDir, rdb, "test-password")
+	testSrv = srv
 	ts = httptest.NewServer(srv.authMiddleware(srv.mux))
 
 	code := m.Run()

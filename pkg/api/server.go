@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/team/agentlink/pkg/redis"
 )
@@ -20,6 +21,8 @@ type Server struct {
 	dataDir          string
 	mux              *http.ServeMux
 	srv              *http.Server
+	hub              Broadcaster // set by Task 4 (WebSocket Hub); nil-guarded until then
+	projMu           sync.Map    // projectID -> *sync.Mutex, serializes writes+commits per project
 }
 
 func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Server {
@@ -52,6 +55,7 @@ func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Serv
 	s.mux.HandleFunc("POST /locks/acquire", s.handleLockAcquire)
 	s.mux.HandleFunc("POST /locks/release", s.handleLockRelease)
 	s.mux.HandleFunc("GET /locks/list", s.handleLockList)
+	s.mux.HandleFunc("POST /projects/{id}/apply", s.handleApply)
 
 	return s
 }
