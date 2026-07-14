@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -134,4 +135,20 @@ func TestClaudeCodeLauncher_ResumeArgs(t *testing.T) {
 			t.Errorf("unexpected fallback args: %v", args)
 		}
 	})
+}
+
+func TestClaudeInitTemplate_containsLockRules(t *testing.T) {
+	l := &ClaudeCodeLauncher{}
+	got := l.InitTemplate("main", "dev1")
+
+	for _, want := range []string{"lock acquire", "lock release", "409"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("InitTemplate() missing %q; got:\n%s", want, got)
+		}
+	}
+
+	// The original identity line must survive the append.
+	if !strings.Contains(got, "dev1") || !strings.Contains(got, "main") {
+		t.Errorf("InitTemplate() lost device/session identity; got:\n%s", got)
+	}
 }
