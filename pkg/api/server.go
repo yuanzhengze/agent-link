@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/team/agentlink/pkg/redis"
+	"github.com/team/agentlink/web"
 )
 
 type contextKey string
@@ -86,6 +87,12 @@ func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Serv
 	hub.previewToken = s.previewToken
 	s.hub = hub
 	s.mux.HandleFunc("GET /ws", hub.handleWS)
+
+	// Catch-all: serves the cowork GUI (index.html/app.js/style.css) from
+	// the embedded web.FS. Go 1.22 ServeMux gives more-specific patterns
+	// precedence, so every route registered above still wins; only
+	// unmatched paths fall through to the file server.
+	s.mux.Handle("GET /", http.FileServer(http.FS(web.FS)))
 
 	return s
 }

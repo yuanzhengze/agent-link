@@ -1519,8 +1519,22 @@ func (s *Server) writeBusyError(w http.ResponseWriter, ctx context.Context, devi
 // users): the preview page is plain HTML loaded directly by a browser,
 // which cannot attach an Authorization header, and it carries no write
 // capability (see handlePreview / Hub.previewToken).
+//
+// The GUI's static assets (Task 10) are exempted the same way and for the
+// same reason: the browser's very first request for index.html/app.js/
+// style.css cannot carry a Bearer token either. This is an exact-match
+// list, not a prefix, so it can never shadow a data route like /projects
+// or /locks/acquire — those still require the token, and the GUI supplies
+// it client-side (see web/app.js) once loaded.
 func skipAuth(path string) bool {
-	return path == "/health" || path == "/agents/register" || path == "/ws" || strings.HasPrefix(path, "/preview/")
+	if path == "/health" || path == "/agents/register" || path == "/ws" || strings.HasPrefix(path, "/preview/") {
+		return true
+	}
+	switch path {
+	case "/", "/index.html", "/app.js", "/style.css":
+		return true
+	}
+	return false
 }
 
 // authMiddleware wraps a handler, checking Bearer API key on protected routes.

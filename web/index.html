@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cowork</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">◆</span>
+      <span class="brand-name">cowork</span>
+      <button id="btn-back" class="btn-back hidden" type="button">&larr; Projects</button>
+      <span id="current-project-name" class="current-project-name"></span>
+    </div>
+    <button id="btn-settings-toggle" class="btn-settings-toggle" type="button">Settings</button>
+  </header>
+
+  <section id="settings-bar" class="settings-bar hidden">
+    <div class="settings-row">
+      <label for="input-token">API token</label>
+      <input id="input-token" type="password" placeholder="sk_live_..." autocomplete="off">
+    </div>
+    <div class="settings-row">
+      <label for="input-session">Session</label>
+      <input id="input-session" type="text" placeholder="main" autocomplete="off">
+    </div>
+    <button id="btn-save-settings" class="btn-primary" type="button">Save</button>
+    <span id="settings-status" class="settings-status"></span>
+  </section>
+
+  <div id="global-error" class="global-error hidden"></div>
+
+  <main id="view-projects" class="view">
+    <div class="view-header">
+      <h1>Projects</h1>
+      <button id="btn-refresh-projects" class="btn-secondary" type="button">Refresh</button>
+    </div>
+    <ul id="project-list" class="project-list"></ul>
+    <p id="project-list-empty" class="empty-hint hidden">No projects yet, or you haven't set your API token yet — open Settings above.</p>
+  </main>
+
+  <main id="view-project" class="view hidden">
+    <div class="panes">
+
+      <section class="pane pane-tree">
+        <div class="pane-header">
+          <h2>Files</h2>
+          <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">Refresh</button>
+        </div>
+        <ul id="file-tree" class="file-tree"></ul>
+        <p id="file-tree-empty" class="empty-hint hidden">No files in this project.</p>
+      </section>
+
+      <section class="pane pane-preview">
+        <div class="pane-header">
+          <h2>Preview</h2>
+        </div>
+        <iframe id="preview-frame" class="preview-frame" title="Live preview"></iframe>
+      </section>
+
+      <section class="pane pane-side">
+        <div class="pane-header">
+          <h2>Online</h2>
+        </div>
+        <ul id="online-panel" class="online-panel"></ul>
+        <p id="online-panel-empty" class="empty-hint hidden">No agents seen yet.</p>
+
+        <div class="pane-header pane-header-alerts">
+          <h2>Alerts</h2>
+          <button id="btn-clear-alerts" class="btn-secondary btn-small" type="button">Clear</button>
+        </div>
+        <ul id="alert-stream" class="alert-stream"></ul>
+      </section>
+
+    </div>
+  </main>
+
+</div>
+
+<div id="context-menu" class="context-menu hidden">
+  <button data-action="acquire" type="button">Acquire lock</button>
+  <button data-action="release" type="button">Release lock</button>
+  <button data-action="force-release" type="button">Force release / take over</button>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
