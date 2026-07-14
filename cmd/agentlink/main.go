@@ -28,6 +28,8 @@ func main() {
 		cmdTask(os.Args[2:])
 	case "poll":
 		cmdPoll(os.Args[2:])
+	case "sync":
+		cmdSync(os.Args[2:])
 	case "whoami":
 		cmdWhoami()
 	case "ping":
@@ -64,6 +66,7 @@ Usage:
   agentlink ping
   agentlink list [--all]
   agentlink poll
+  agentlink sync <project> <localDir>
   agentlink task send [--interrupt] [--title <title>] <target> [<task_id>] <content>
   agentlink task result <task_id> <status> <result>
   agentlink task resume <task_id> <guidance>
@@ -182,6 +185,20 @@ func cmdPull(args []string) {
 
 func cmdPoll(args []string) {
 	if err := rt.RunPoll(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdSync(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink sync <project> <localDir>")
+		os.Exit(1)
+	}
+	project := args[0]
+	localDir := args[1]
+
+	if err := rt.RunSync(project, localDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
