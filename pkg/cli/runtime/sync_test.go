@@ -209,3 +209,145 @@ func TestSync_ignoresEchoedChange(t *testing.T) {
 		t.Errorf("expected c.html to NOT be written for self-authored event, stat err=%v", err)
 	}
 }
+
+// TestSync_flushDirtyAppliesSequentially exercises the drain logic added
+// to fix #3 (concurrent same-path applies racing at the server) and #2
+// (edits lost on shutdown): pre-populate the dirty set with two paths and
+// call flushDirty directly (as flushWorker does, both on every debounce
+// signal and once more on shutdown), then assert both were applied with
+// their on-disk content and the dirty set ends up empty.
+func TestSync_flushDirtyAppliesSequentially(t *testing.T) {
+	var mu sync.Mutex
+	appliedContent := map[string]string{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
+	})
+	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		appliedContent[body["path"]] = body["content"]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.html"), []byte("content-a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.html"), []byte("content-b"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Syncer{
+		Project:  "p1",
+		LocalDir: dir,
+		Session:  "main",
+		Device:   "dev1",
+		Server:   srv.URL,
+		APIKey:   "sk_test",
+		Stdout:   io.Discard,
+	}
+	s.initDefaults()
+
+	s.mu.Lock()
+	s.dirty["a.html"] = struct{}{}
+	s.dirty["b.html"] = struct{}{}
+	s.mu.Unlock()
+
+	s.flushDirty()
+
+	mu.Lock()
+	if appliedContent["a.html"] != "content-a" {
+		t.Errorf("a.html: expected apply content %q, got %q", "content-a", appliedContent["a.html"])
+	}
+	if appliedContent["b.html"] != "content-b" {
+		t.Errorf("b.html: expected apply content %q, got %q", "content-b", appliedContent["b.html"])
+	}
+	mu.Unlock()
+
+	s.mu.Lock()
+	dirtyLen := len(s.dirty)
+	s.mu.Unlock()
+	if dirtyLen != 0 {
+		t.Errorf("expected dirty set to be emptied after flushDirty, got %d entries", dirtyLen)
+	}
+}
+
+// TestSync_flushDirtyAppliesCurrentContentOnRedirty proves the property
+// behind the #3 fix deterministically, without relying on real goroutine
+// timing: a path that is marked dirty and flushed, edited again, and
+// marked dirty and flushed a second time, always uploads the CURRENT
+// on-disk content at the time of the second drain (v2), never a stale
+// snapshot captured earlier. This is what makes concurrent same-path
+// applies impossible to reorder into a stale-content-wins outcome — every
+// drain re-reads the file fresh, so the most recent edit always wins.
+func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
+	var mu sync.Mutex
+	var appliedContents []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
+	})
+	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		appliedContents = append(appliedContents, body["content"])
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.html")
+	if err := os.WriteFile(path, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Syncer{
+		Project:  "p1",
+		LocalDir: dir,
+		Session:  "main",
+		Device:   "dev1",
+		Server:   srv.URL,
+		APIKey:   "sk_test",
+		Stdout:   io.Discard,
+	}
+	s.initDefaults()
+
+	s.mu.Lock()
+	s.dirty["a.html"] = struct{}{}
+	s.mu.Unlock()
+	s.flushDirty()
+
+	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.mu.Lock()
+	s.dirty["a.html"] = struct{}{}
+	s.mu.Unlock()
+	s.flushDirty()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(appliedContents) != 2 {
+		t.Fatalf("expected 2 apply calls, got %d: %v", len(appliedContents), appliedContents)
+	}
+	if appliedContents[0] != "v1" {
+		t.Errorf("first apply: expected %q, got %q", "v1", appliedContents[0])
+	}
+	if appliedContents[1] != "v2" {
+		t.Errorf("second apply: expected CURRENT content %q, got %q", "v2", appliedContents[1])
+	}
+}

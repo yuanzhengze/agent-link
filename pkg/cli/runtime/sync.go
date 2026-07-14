@@ -21,9 +21,9 @@ import (
 	api "github.com/team/agentlink/pkg/cli/net"
 )
 
-// syncDebounce is how long handleLocalChange waits for a relative path to
-// go quiet before applying it, so a burst of writes (editor save, build
-// tool) collapses into a single apply.
+// syncDebounce is how long watchLoop waits for the directory tree to go
+// quiet before waking flushWorker to drain the dirty set, so a burst of
+// writes (editor save, build tool) collapses into a single apply per path.
 const syncDebounce = 300 * time.Millisecond
 
 // syncReconnectBackoff is the delay between WebSocket reconnect attempts.
@@ -70,6 +70,16 @@ type Syncer struct {
 	// snapshot). handleLocalChange compares against this before applying,
 	// so our own write-back is never re-uploaded.
 	lastWrittenHash map[string]string
+	// dirty is the set of relative paths with a pending local edit not
+	// yet drained by flushDirty. watchLoop adds to it (and arms the
+	// debounce timer) on qualifying fsnotify events; flushDirty snapshots
+	// and clears it. Guarded by mu.
+	dirty map[string]struct{}
+	// flushCh signals flushWorker that dirty has content to drain.
+	// Buffered size 1 so watchLoop's debounce-timer callback (signalFlush)
+	// never blocks: a pending signal already covers whatever is in dirty
+	// by the time the worker gets to it.
+	flushCh chan struct{}
 }
 
 func (s *Syncer) initDefaults() {
@@ -82,6 +92,12 @@ func (s *Syncer) initDefaults() {
 	s.mu.Lock()
 	if s.lastWrittenHash == nil {
 		s.lastWrittenHash = make(map[string]string)
+	}
+	if s.dirty == nil {
+		s.dirty = make(map[string]struct{})
+	}
+	if s.flushCh == nil {
+		s.flushCh = make(chan struct{}, 1)
 	}
 	s.mu.Unlock()
 }
@@ -182,10 +198,13 @@ type syncApplyResponse struct {
 	HeadCommit string `json:"head_commit"`
 }
 
-// handleLocalChange is invoked (after debounce) for a relative path that
-// fsnotify reported as changed. It skips the upload entirely if the
-// on-disk content matches what we most recently wrote ourselves (a WS
-// echo), otherwise acquires the file lock and applies the new content.
+// handleLocalChange is invoked, for a relative path that fsnotify
+// reported as changed, exclusively by flushDirty draining the dirty set
+// (see flushDirty / flushWorker) — never directly from a timer callback —
+// so at most one handleLocalChange for a given rel is ever in flight. It
+// skips the upload entirely if the on-disk content matches what we most
+// recently wrote ourselves (a WS echo), otherwise acquires the file lock
+// and applies the new content.
 func (s *Syncer) handleLocalChange(rel string) error {
 	s.initDefaults()
 
@@ -196,6 +215,17 @@ func (s *Syncer) handleLocalChange(rel string) error {
 	}
 	h := hash(string(content))
 
+	// Known v1 limitation (not fixed here, by design): if a genuine local
+	// edit races an incoming WS write to this SAME path, handleRemoteEvent
+	// may set lastWrittenHash[rel] to the WS content between our read
+	// above and this check, making our own (different, newer-on-disk-only
+	// in the sense of "not yet uploaded") edit look like an echo — so it
+	// is silently dropped: no apply, no warning, no error. This is
+	// mitigated in practice by the write-lock discipline (agents are
+	// expected to acquire the file lock before editing, so a concurrent
+	// WS write to a path we're actively editing should be rare); a
+	// complete fix needs content versioning or mtime comparison, which is
+	// out of scope for v1.
 	s.mu.Lock()
 	echo := s.lastWrittenHash[rel] == h
 	s.mu.Unlock()
@@ -223,6 +253,40 @@ func (s *Syncer) handleLocalChange(rel string) error {
 	return nil
 }
 
+// flushDirty drains the dirty set into a local slice — snapshotting and
+// clearing it under mu, then releasing the lock before doing any I/O —
+// and calls handleLocalChange for each path SEQUENTIALLY. Because this is
+// the only path that ever invokes handleLocalChange for locally-observed
+// changes (watchLoop just marks paths dirty and arms a debounce timer; it
+// never calls handleLocalChange itself), there is never more than one
+// handleLocalChange in flight for the same rel — the fix for #3 (two
+// concurrent applies for one path racing at the server, last-arrival-wins,
+// silently reverting to stale content). Each handleLocalChange call reads
+// the file fresh at drain time, so a path that was edited again after
+// being marked dirty (but before this drain) still uploads its current
+// content, not a stale snapshot.
+//
+// flushWorker calls this both on every debounce signal and once more,
+// finally, on shutdown (ctx.Done()) — that final call is what flushes any
+// edit debounced but not yet applied, fixing #2 (edits lost on shutdown).
+func (s *Syncer) flushDirty() {
+	s.initDefaults()
+
+	s.mu.Lock()
+	rels := make([]string, 0, len(s.dirty))
+	for rel := range s.dirty {
+		rels = append(rels, rel)
+	}
+	s.dirty = make(map[string]struct{})
+	s.mu.Unlock()
+
+	for _, rel := range rels {
+		if err := s.handleLocalChange(rel); err != nil {
+			fmt.Fprintf(s.Stdout, "sync: apply %s failed: %s\n", rel, err)
+		}
+	}
+}
+
 // acquireLock requests the file lock for rel. conflict is true on a 409
 // (someone else holds it); the caller should skip the apply, not error out.
 func (s *Syncer) acquireLock(rel string) (conflict bool, err error) {
@@ -244,6 +308,7 @@ func (s *Syncer) acquireLock(rel string) (conflict bool, err error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusConflict {
+		io.Copy(io.Discard, resp.Body)
 		return true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -276,6 +341,7 @@ func (s *Syncer) applyOne(rel, content string) (conflict bool, err error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusConflict {
+		io.Copy(io.Discard, resp.Body)
 		return true, nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -333,8 +399,11 @@ func (s *Syncer) handleRemoteEvent(ev syncEvent) error {
 // -- Run: fsnotify + WS plumbing (thin; not unit-tested) --
 
 // Run pulls the initial snapshot, then blocks watching for local file
-// changes (fsnotify, debounced) and remote changes (WebSocket, with
-// reconnect) until Ctx is cancelled.
+// changes (fsnotify, debounced through a single flushWorker so per-path
+// applies never run concurrently — see flushDirty) and remote changes
+// (WebSocket, with reconnect) until Ctx is cancelled. On cancellation,
+// flushWorker performs one final drain of any not-yet-applied debounced
+// edits before Run returns.
 func (s *Syncer) Run() error {
 	s.initDefaults()
 
@@ -347,15 +416,15 @@ func (s *Syncer) Run() error {
 	if err != nil {
 		return err
 	}
-	defer watcher.Close()
 
 	if err := addWatchDirs(watcher, s.LocalDir); err != nil {
 		fmt.Fprintf(s.Stdout, "sync: watch setup failed: %s\n", err)
+		watcher.Close()
 		return err
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
@@ -367,37 +436,65 @@ func (s *Syncer) Run() error {
 		s.wsLoop()
 	}()
 
+	go func() {
+		defer wg.Done()
+		s.flushWorker(s.ctx())
+	}()
+
 	<-s.ctx().Done()
 	watcher.Close()
 	wg.Wait()
 	return s.ctx().Err()
 }
 
-// watchLoop consumes fsnotify events, ignoring hidden paths and directory
-// events (except adding newly-created directories to the watch set), and
-// debounces bursts of writes per relative path before calling
-// handleLocalChange.
-func (s *Syncer) watchLoop(watcher *fsnotify.Watcher) {
-	var tmu sync.Mutex
-	timers := map[string]*time.Timer{}
-
-	stopAll := func() {
-		tmu.Lock()
-		for _, t := range timers {
-			t.Stop()
+// flushWorker is the single dedicated goroutine that drains the dirty set
+// (see flushDirty's doc comment for why this must be the only caller of
+// handleLocalChange on the local-change path). It wakes on every debounce
+// signal and, on ctx cancellation, performs one FINAL flushDirty before
+// returning so any edit that was debounced but hadn't fired yet is still
+// applied on graceful shutdown (#2). It never holds s.mu across the
+// flushDirty call (flushDirty takes and releases mu internally, well
+// before doing I/O), and flushCh is a non-blocking, buffered-1 send from
+// the timer callback, so neither side can deadlock: the worker is always
+// either blocked in select (able to observe ctx.Done() immediately) or
+// busy running flushDirty (which itself cannot block on flushCh or mu).
+func (s *Syncer) flushWorker(ctx context.Context) {
+	for {
+		select {
+		case <-s.flushCh:
+			s.flushDirty()
+		case <-ctx.Done():
+			s.flushDirty()
+			return
 		}
-		tmu.Unlock()
+	}
+}
+
+// watchLoop consumes fsnotify events, ignoring hidden paths and directory
+// events (except recursively adding newly-created directory trees to the
+// watch set), and debounces bursts of writes across all paths behind a
+// SINGLE timer: a qualifying event marks its relative path dirty and
+// (re)arms the timer, whose callback only signals flushWorker (via
+// signalFlush) — it never calls handleLocalChange itself. That single
+// worker is what serializes applies per path (see flushDirty), fixing #3.
+func (s *Syncer) watchLoop(watcher *fsnotify.Watcher) {
+	var timer *time.Timer
+
+	stop := func() {
+		if timer != nil {
+			timer.Stop()
+		}
 	}
 
 	for {
 		select {
 		case <-s.ctx().Done():
-			stopAll()
+			stop()
 			return
 
 		case ev, ok := <-watcher.Events:
 			if !ok {
-				stopAll()
+				stop()
 				return
 			}
 			if isHiddenPath(s.LocalDir, ev.Name) {
@@ -407,7 +504,10 @@ func (s *Syncer) watchLoop(watcher *fsnotify.Watcher) {
 			info, statErr := os.Stat(ev.Name)
 			if statErr == nil && info.IsDir() {
 				if ev.Op&fsnotify.Create != 0 {
-					if addErr := watcher.Add(ev.Name); addErr != nil {
+					// Recurse: a moved-in or mkdir -p'd tree can bring
+					// nested subdirs with it, and those need watching
+					// too, not just the top-level dir (#4).
+					if addErr := addWatchDirs(watcher, ev.Name); addErr != nil {
 						fmt.Fprintf(s.Stdout, "sync: watch %s failed: %s\n", ev.Name, addErr)
 					}
 				}
@@ -423,24 +523,33 @@ func (s *Syncer) watchLoop(watcher *fsnotify.Watcher) {
 			}
 			rel = filepath.ToSlash(rel)
 
-			tmu.Lock()
-			if t, exists := timers[rel]; exists {
-				t.Stop()
+			s.mu.Lock()
+			s.dirty[rel] = struct{}{}
+			s.mu.Unlock()
+
+			if timer != nil {
+				timer.Stop()
 			}
-			timers[rel] = time.AfterFunc(syncDebounce, func() {
-				if err := s.handleLocalChange(rel); err != nil {
-					fmt.Fprintf(s.Stdout, "sync: apply %s failed: %s\n", rel, err)
-				}
-			})
-			tmu.Unlock()
+			timer = time.AfterFunc(syncDebounce, s.signalFlush)
 
 		case werr, ok := <-watcher.Errors:
 			if !ok {
-				stopAll()
+				stop()
 				return
 			}
 			fmt.Fprintf(s.Stdout, "sync: watcher error: %s\n", werr)
 		}
+	}
+}
+
+// signalFlush wakes flushWorker to drain the dirty set. The send is
+// non-blocking (flushCh is buffered size 1): if a signal is already
+// pending, the worker hasn't drained yet, and whatever caused this signal
+// is already reflected in the dirty set the pending wake-up will see.
+func (s *Syncer) signalFlush() {
+	select {
+	case s.flushCh <- struct{}{}:
+	default:
 	}
 }
 
