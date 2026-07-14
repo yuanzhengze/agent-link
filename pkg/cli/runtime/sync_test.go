@@ -1,6 +1,7 @@
 package rt
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSync_snapshotWritesFiles(t *testing.T) {
@@ -93,7 +95,7 @@ func TestSync_localChangeCallsApply(t *testing.T) {
 		Stdout:   io.Discard,
 	}
 
-	if err := s.handleLocalChange("a.html"); err != nil {
+	if err := s.handleLocalChange(context.Background(), "a.html"); err != nil {
 		t.Fatalf("handleLocalChange: %v", err)
 	}
 
@@ -185,7 +187,7 @@ func TestSync_ignoresEchoedChange(t *testing.T) {
 	// fsnotify would now fire for b.html since it changed on disk. The
 	// content on disk is identical to what handleRemoteEvent just wrote,
 	// so this must be recognized as an echo and NOT trigger an apply.
-	if err := s.handleLocalChange("b.html"); err != nil {
+	if err := s.handleLocalChange(context.Background(), "b.html"); err != nil {
 		t.Fatalf("handleLocalChange: %v", err)
 	}
 
@@ -261,7 +263,7 @@ func TestSync_flushDirtyAppliesSequentially(t *testing.T) {
 	s.dirty["b.html"] = struct{}{}
 	s.mu.Unlock()
 
-	s.flushDirty()
+	s.flushDirty(context.Background())
 
 	mu.Lock()
 	if appliedContent["a.html"] != "content-a" {
@@ -329,7 +331,7 @@ func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
 	s.mu.Lock()
 	s.dirty["a.html"] = struct{}{}
 	s.mu.Unlock()
-	s.flushDirty()
+	s.flushDirty(context.Background())
 
 	if err := os.WriteFile(path, []byte("v2"), 0o644); err != nil {
 		t.Fatal(err)
@@ -337,7 +339,7 @@ func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
 	s.mu.Lock()
 	s.dirty["a.html"] = struct{}{}
 	s.mu.Unlock()
-	s.flushDirty()
+	s.flushDirty(context.Background())
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -349,5 +351,224 @@ func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
 	}
 	if appliedContents[1] != "v2" {
 		t.Errorf("second apply: expected CURRENT content %q, got %q", "v2", appliedContents[1])
+	}
+}
+
+// TestSync_finalFlushUsesLiveContext proves the fix for the CRITICAL bug:
+// flushWorker's shutdown-time final drain must use a still-LIVE context
+// for its network calls, not s.Ctx (which is already cancelled by the
+// time that drain runs — its cancellation is what triggered shutdown in
+// the first place). Building the acquire/apply requests with an
+// already-cancelled context makes every one of them fail immediately
+// with "context canceled" before reaching the server, silently dropping
+// every edit debounced but not yet applied at shutdown.
+//
+// This constructs a Syncer whose Ctx is already cancelled (mirroring the
+// daemon's state exactly when flushWorker's ctx.Done() branch runs), puts
+// a dirty edit in s.dirty, and shows that:
+//   - flushDirty(s.ctx()) — i.e. draining with the cancelled context, as
+//     the pre-fix code effectively did — reaches the server ZERO times
+//     (locks in the root cause).
+//   - flushDirty(context.Background()) — i.e. draining with the fresh,
+//     live context flushWorker now passes for the final drain — reaches
+//     the server and applies the correct content (proves the fix).
+func TestSync_finalFlushUsesLiveContext(t *testing.T) {
+	var mu sync.Mutex
+	acquireCalls := 0
+	applyCalls := 0
+	var appliedContent string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		acquireCalls++
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
+	})
+	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		applyCalls++
+		appliedContent = body["content"]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.html"), []byte("pending edit"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // Ctx is already cancelled, exactly as it is when flushWorker's ctx.Done() branch runs.
+
+	s := &Syncer{
+		Project:  "p1",
+		LocalDir: dir,
+		Session:  "main",
+		Device:   "dev1",
+		Server:   srv.URL,
+		APIKey:   "sk_test",
+		Stdout:   io.Discard,
+		Ctx:      cancelledCtx,
+	}
+	s.initDefaults()
+
+	// Root cause, locked in: draining with the daemon's own (cancelled)
+	// context reaches the server zero times — every request fails
+	// immediately with "context canceled" before it goes out.
+	s.mu.Lock()
+	s.dirty["a.html"] = struct{}{}
+	s.mu.Unlock()
+	s.flushDirty(s.ctx())
+
+	mu.Lock()
+	gotAcquire, gotApply := acquireCalls, applyCalls
+	mu.Unlock()
+	if gotAcquire != 0 || gotApply != 0 {
+		t.Fatalf("flushDirty(s.ctx()) [cancelled]: expected 0 acquire/apply calls, got acquire=%d apply=%d", gotAcquire, gotApply)
+	}
+
+	// The fix: draining with a fresh, live context (what flushWorker's
+	// shutdown branch now passes) reaches the server and applies the
+	// pending edit, even though s.Ctx itself is cancelled.
+	s.mu.Lock()
+	s.dirty["a.html"] = struct{}{}
+	s.mu.Unlock()
+	s.flushDirty(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if applyCalls != 1 {
+		t.Fatalf("flushDirty(live ctx): expected exactly 1 apply call, got %d", applyCalls)
+	}
+	if appliedContent != "pending edit" {
+		t.Errorf("flushDirty(live ctx): expected applied content %q, got %q", "pending edit", appliedContent)
+	}
+}
+
+// TestSync_runFlushesOnShutdown is the Run()-level version of the same
+// proof: it starts Run() for real, with a debounce interval set so large
+// that the normal timer-driven flush can never fire before the test
+// cancels Ctx, so the only way the edit can reach the server is via
+// flushWorker's shutdown-time final drain.
+func TestSync_runFlushesOnShutdown(t *testing.T) {
+	var mu sync.Mutex
+	var appliedContent string
+	applyCalls := 0
+	snapshotServed := make(chan struct{}, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/projects/p1/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"head_commit": "deadbeef",
+			"files":       []map[string]string{},
+		})
+		select {
+		case snapshotServed <- struct{}{}:
+		default:
+		}
+	})
+	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
+	})
+	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		applyCalls++
+		appliedContent = body["content"]
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		// No real WS upgrade needed for this test; just refuse politely
+		// so wsLoop's dial fails fast and it backs off without noise.
+		http.Error(w, "not implemented", http.StatusNotImplemented)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	dir := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Syncer{
+		Project:  "p1",
+		LocalDir: dir,
+		Session:  "main",
+		Device:   "dev1",
+		Server:   srv.URL,
+		APIKey:   "sk_test",
+		Stdout:   io.Discard,
+		Ctx:      ctx,
+		debounce: time.Hour, // never fires on its own during this test
+	}
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- s.Run()
+	}()
+
+	select {
+	case <-snapshotServed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for initial snapshot pull")
+	}
+
+	// The snapshotServed signal fires (on the server, mid-handler) before
+	// Run has necessarily finished creating and arming the fsnotify
+	// watcher back on the client side, so a single write right after it
+	// can race watcher setup and be missed entirely. Rewrite the file
+	// repeatedly (harmless: same content, and dirty-marking is
+	// idempotent) until the watcher demonstrably picks it up, bounded
+	// well under debounce (1h) so it can never race the normal flush
+	// timer.
+	targetPath := filepath.Join(dir, "shutdown.html")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := os.WriteFile(targetPath, []byte("edited before shutdown"), 0o644); err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		s.mu.Lock()
+		_, dirty := s.dirty["shutdown.html"]
+		s.mu.Unlock()
+		if dirty {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("timed out waiting for fsnotify to mark shutdown.html dirty")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+
+	select {
+	case err := <-runErrCh:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Run(): unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Run() to return after cancel")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if applyCalls != 1 {
+		t.Fatalf("expected exactly 1 apply call from the shutdown drain, got %d", applyCalls)
+	}
+	if appliedContent != "edited before shutdown" {
+		t.Errorf("expected applied content %q, got %q", "edited before shutdown", appliedContent)
 	}
 }

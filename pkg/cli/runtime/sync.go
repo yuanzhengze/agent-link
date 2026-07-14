@@ -11,9 +11,11 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -28,6 +30,11 @@ const syncDebounce = 300 * time.Millisecond
 
 // syncReconnectBackoff is the delay between WebSocket reconnect attempts.
 const syncReconnectBackoff = 2 * time.Second
+
+// syncFinalFlushTimeout bounds the shutdown-time final drain (see
+// flushWorker), so a graceful shutdown can't hang forever if the server
+// is unreachable when the daemon is asked to exit.
+const syncFinalFlushTimeout = 10 * time.Second
 
 // syncEvent mirrors the server's pkg/api.Event shape (apply.go). Defined
 // locally rather than importing pkg/api, since the CLI is a separate
@@ -63,6 +70,11 @@ type Syncer struct {
 
 	// Overridable for testing.
 	httpDo func(req *http.Request) (*http.Response, error)
+	// debounce is how long watchLoop waits for the directory tree to go
+	// quiet before waking flushWorker (see syncDebounce). Defaults to
+	// syncDebounce; overridable in tests that need to force an edit to
+	// only be flushed by the shutdown path, never the normal timer.
+	debounce time.Duration
 
 	mu sync.Mutex
 	// lastWrittenHash records the content hash of the last write WE made
@@ -88,6 +100,9 @@ func (s *Syncer) initDefaults() {
 	}
 	if s.httpDo == nil {
 		s.httpDo = http.DefaultClient.Do
+	}
+	if s.debounce <= 0 {
+		s.debounce = syncDebounce
 	}
 	s.mu.Lock()
 	if s.lastWrittenHash == nil {
@@ -205,7 +220,16 @@ type syncApplyResponse struct {
 // skips the upload entirely if the on-disk content matches what we most
 // recently wrote ourselves (a WS echo), otherwise acquires the file lock
 // and applies the new content.
-func (s *Syncer) handleLocalChange(rel string) error {
+//
+// ctx is threaded through explicitly (rather than using s.ctx()) so that
+// flushWorker's shutdown-time final drain can pass a still-live context:
+// s.ctx() is already cancelled by the time that drain runs (its
+// cancellation is what triggered the shutdown), and building the HTTP
+// requests below with an already-cancelled context would make every one
+// of them fail immediately with "context canceled" before reaching the
+// server — silently dropping the very edits shutdown is supposed to
+// flush. See flushWorker/flushDirty for the two contexts in play.
+func (s *Syncer) handleLocalChange(ctx context.Context, rel string) error {
 	s.initDefaults()
 
 	full := filepath.Join(s.LocalDir, filepath.FromSlash(rel))
@@ -233,7 +257,7 @@ func (s *Syncer) handleLocalChange(rel string) error {
 		return nil
 	}
 
-	conflict, err := s.acquireLock(rel)
+	conflict, err := s.acquireLock(ctx, rel)
 	if err != nil {
 		return err
 	}
@@ -242,7 +266,7 @@ func (s *Syncer) handleLocalChange(rel string) error {
 		return nil
 	}
 
-	conflict, err = s.applyOne(rel, string(content))
+	conflict, err = s.applyOne(ctx, rel, string(content))
 	if err != nil {
 		return err
 	}
@@ -269,7 +293,12 @@ func (s *Syncer) handleLocalChange(rel string) error {
 // flushWorker calls this both on every debounce signal and once more,
 // finally, on shutdown (ctx.Done()) — that final call is what flushes any
 // edit debounced but not yet applied, fixing #2 (edits lost on shutdown).
-func (s *Syncer) flushDirty() {
+// The ctx passed in is used for the network calls made while draining:
+// the normal path passes s.ctx(), but flushWorker's shutdown-time call
+// passes a fresh, still-live context (s.ctx() is already cancelled by
+// then), so the final drain's requests actually reach the server instead
+// of failing immediately with "context canceled".
+func (s *Syncer) flushDirty(ctx context.Context) {
 	s.initDefaults()
 
 	s.mu.Lock()
@@ -281,7 +310,7 @@ func (s *Syncer) flushDirty() {
 	s.mu.Unlock()
 
 	for _, rel := range rels {
-		if err := s.handleLocalChange(rel); err != nil {
+		if err := s.handleLocalChange(ctx, rel); err != nil {
 			fmt.Fprintf(s.Stdout, "sync: apply %s failed: %s\n", rel, err)
 		}
 	}
@@ -289,12 +318,12 @@ func (s *Syncer) flushDirty() {
 
 // acquireLock requests the file lock for rel. conflict is true on a 409
 // (someone else holds it); the caller should skip the apply, not error out.
-func (s *Syncer) acquireLock(rel string) (conflict bool, err error) {
+func (s *Syncer) acquireLock(ctx context.Context, rel string) (conflict bool, err error) {
 	body, err := json.Marshal(syncLockAcquireRequest{Project: s.Project, Session: s.Session, Path: rel})
 	if err != nil {
 		return false, err
 	}
-	req, err := http.NewRequestWithContext(s.ctx(), "POST", s.Server+"/locks/acquire", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.Server+"/locks/acquire", bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
@@ -321,13 +350,13 @@ func (s *Syncer) acquireLock(rel string) (conflict bool, err error) {
 
 // applyOne uploads rel's new content. conflict is true on a 409 (the lock
 // was lost or held by someone else between acquire and apply).
-func (s *Syncer) applyOne(rel, content string) (conflict bool, err error) {
+func (s *Syncer) applyOne(ctx context.Context, rel, content string) (conflict bool, err error) {
 	body, err := json.Marshal(syncApplyRequest{Session: s.Session, Path: rel, Content: content})
 	if err != nil {
 		return false, err
 	}
 	url := fmt.Sprintf("%s/projects/%s/apply", s.Server, s.Project)
-	req, err := http.NewRequestWithContext(s.ctx(), "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
@@ -458,13 +487,26 @@ func (s *Syncer) Run() error {
 // the timer callback, so neither side can deadlock: the worker is always
 // either blocked in select (able to observe ctx.Done() immediately) or
 // busy running flushDirty (which itself cannot block on flushCh or mu).
+//
+// The normal (<-s.flushCh) path drains using s.ctx(): that context is
+// still live at that point, since ctx cancellation is what would trigger
+// the OTHER branch. The shutdown (<-ctx.Done()) path, by contrast, is
+// only reached once ctx (== s.ctx(), passed in by Run) is ALREADY
+// cancelled — so draining with that same context would make every
+// request in the final flush fail immediately with "context canceled",
+// never reaching the server. Instead it drains with a fresh context
+// bounded by syncFinalFlushTimeout, not derived from ctx, so those final
+// applies actually go out, while still bounding shutdown in case the
+// server is unreachable.
 func (s *Syncer) flushWorker(ctx context.Context) {
 	for {
 		select {
 		case <-s.flushCh:
-			s.flushDirty()
+			s.flushDirty(s.ctx())
 		case <-ctx.Done():
-			s.flushDirty()
+			finalCtx, cancel := context.WithTimeout(context.Background(), syncFinalFlushTimeout)
+			s.flushDirty(finalCtx)
+			cancel()
 			return
 		}
 	}
@@ -530,7 +572,7 @@ func (s *Syncer) watchLoop(watcher *fsnotify.Watcher) {
 			if timer != nil {
 				timer.Stop()
 			}
-			timer = time.AfterFunc(syncDebounce, s.signalFlush)
+			timer = time.AfterFunc(s.debounce, s.signalFlush)
 
 		case werr, ok := <-watcher.Errors:
 			if !ok {
@@ -652,6 +694,13 @@ func (s *Syncer) sleepOrDone(d time.Duration) bool {
 
 // RunSync loads the CLI's stored auth/session, ensures localDir exists,
 // and runs the sync daemon until Ctx (or the process) is cancelled.
+//
+// Ctx is wired to Ctrl-C / SIGTERM via signal.NotifyContext, so an
+// operator-initiated shutdown cancels it, which unblocks Run(): the
+// watcher closes and flushWorker performs its final drain (see
+// flushWorker) before the process exits — without this, s.ctx() would
+// fall back to context.Background(), which never cancels, and the
+// shutdown/flush path would never engage in production.
 func RunSync(project, localDir string) error {
 	cfg, creds, err := api.LoadAuth()
 	if err != nil {
@@ -667,6 +716,9 @@ func RunSync(project, localDir string) error {
 		return err
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	s := &Syncer{
 		Project:  project,
 		LocalDir: localDir,
@@ -675,7 +727,11 @@ func RunSync(project, localDir string) error {
 		Server:   cfg.Server,
 		APIKey:   creds.APIKey,
 		Stdout:   os.Stdout,
+		Ctx:      ctx,
 	}
 	s.initDefaults()
-	return s.Run()
+	if err := s.Run(); err != nil && err != context.Canceled {
+		return err
+	}
+	return nil
 }
