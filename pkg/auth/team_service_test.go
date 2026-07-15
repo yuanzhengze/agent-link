@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"errors"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -282,14 +284,32 @@ func TestConcurrentTransferOwnerSingleOwner(t *testing.T) {
 	close(start)
 	wg.Wait()
 
+	successIndex := -1
 	var successes int
-	for _, err := range results {
+	for i, err := range results {
 		if err == nil {
 			successes++
+			successIndex = i
+			continue
+		}
+		if !errors.Is(err, ErrForbidden) {
+			t.Fatalf("failed TransferOwner error = %v; want ErrForbidden", err)
 		}
 	}
 	if successes != 1 {
 		t.Fatalf("concurrent TransferOwner successes = %d; want 1 (%v)", successes, results)
+	}
+
+	team, err := store.Team(context.Background(), result.Team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if team.OwnerUserID != targets[successIndex].ID {
+		t.Fatalf("OwnerUserID = %q; want successful target %q", team.OwnerUserID, targets[successIndex].ID)
+	}
+	oldOwnerRole, err := store.Role(context.Background(), result.Team.ID, owner.ID)
+	if err != nil || oldOwnerRole != RoleAdmin {
+		t.Fatalf("old owner role = %q, %v; want admin", oldOwnerRole, err)
 	}
 
 	members, err := rdbHGetAllRoles(t, store, result.Team.ID)
@@ -375,6 +395,208 @@ func TestOwnerCannotSelfRemoveOrDemote(t *testing.T) {
 	}
 	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), owner.ID, RoleMember); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("owner self demote to member error = %v; want ErrForbidden", err)
+	}
+}
+
+func TestMissingTargetMutationsReturnErrNotMemberWithoutChanges(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	target := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Missing Target")
+	actor := teamActor(owner, result.Team.ID, RoleOwner)
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "change role",
+			run: func() error {
+				return svc.ChangeRole(context.Background(), actor, target.ID, RoleAdmin)
+			},
+		},
+		{
+			name: "remove member",
+			run: func() error {
+				return svc.RemoveMember(context.Background(), actor, target.ID)
+			},
+		},
+		{
+			name: "transfer owner",
+			run: func() error {
+				return svc.TransferOwner(context.Background(), actor, target.ID)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := snapshotTeamMutationState(t, rdb, result.Team.ID, owner.ID, target.ID)
+			if err := tt.run(); !errors.Is(err, ErrNotMember) {
+				t.Fatalf("operation error = %v; want ErrNotMember", err)
+			}
+			after := snapshotTeamMutationState(t, rdb, result.Team.ID, owner.ID, target.ID)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("team state changed:\nbefore = %#v\nafter  = %#v", before, after)
+			}
+		})
+	}
+}
+
+func TestListMembersCleansNonOwnerOrphanAndContinues(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	orphan := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	survivor := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Orphan Cleanup")
+	joinTestTeam(t, svc, orphan, result.Team.ID, result.InviteCode)
+	joinTestTeam(t, svc, survivor, result.Team.ID, result.InviteCode)
+
+	if err := rdb.Del(context.Background(), userKey(orphan.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	members, err := svc.ListMembers(context.Background(), teamActor(owner, result.Team.ID, RoleOwner))
+	if err != nil {
+		t.Fatalf("ListMembers() error = %v; want orphan skipped", err)
+	}
+	gotIDs := make([]string, 0, len(members))
+	for _, member := range members {
+		gotIDs = append(gotIDs, member.UserID)
+	}
+	sort.Strings(gotIDs)
+	wantIDs := []string{owner.ID, survivor.ID}
+	sort.Strings(wantIDs)
+	if !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("ListMembers() IDs = %v; want %v", gotIDs, wantIDs)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, orphan.ID, false)
+	assertUserTeamIndex(t, rdb, orphan.ID, result.Team.ID, false)
+}
+
+func TestListMembersMissingOwnerReturnsConsistencyErrorWithoutCleanup(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Missing Owner")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+
+	if err := rdb.Del(context.Background(), userKey(owner.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.ListMembers(context.Background(), teamActor(member, result.Team.ID, RoleMember))
+	if err == nil || !errors.Is(err, ErrStoreInconsistent) || !strings.Contains(err.Error(), "inconsistent") {
+		t.Fatalf("ListMembers() error = %v; want explicit internal consistency error", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, owner.ID, true)
+	assertUserTeamIndex(t, rdb, owner.ID, result.Team.ID, true)
+}
+
+func TestListMembersUserReadErrorDoesNotCleanup(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "User Read Error")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+
+	if err := rdb.Del(context.Background(), userKey(member.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(context.Background(), userKey(member.ID), "wrong-type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.ListMembers(context.Background(), teamActor(owner, result.Team.ID, RoleOwner)); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListMembers() error = %v; want Redis read error", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, member.ID, true)
+	assertUserTeamIndex(t, rdb, member.ID, result.Team.ID, true)
+}
+
+func TestJoinTeamRequiresExistingActiveUser(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	inactive := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Active Joiners")
+	if err := store.SetUserStatus(context.Background(), inactive.ID, "inactive"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.JoinTeam(context.Background(), inactive.ID, result.Team.ID, result.InviteCode); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("inactive JoinTeam() error = %v; want ErrForbidden", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, inactive.ID, false)
+	assertUserTeamIndex(t, rdb, inactive.ID, result.Team.ID, false)
+
+	missingID, err := NewUserID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupAuthKeys(t, rdb, userTeamsKey(missingID))
+	if _, err := svc.JoinTeam(context.Background(), missingID, result.Team.ID, result.InviteCode); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing-user JoinTeam() error = %v; want ErrNotFound", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, missingID, false)
+	assertUserTeamIndex(t, rdb, missingID, result.Team.ID, false)
+}
+
+func TestJoinTeamCorruptRedisTypeReturnsInternalError(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Corrupt Join")
+
+	if err := rdb.Del(context.Background(), teamKey(result.Team.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(context.Background(), teamKey(result.Team.ID), "wrong-type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	_, err := svc.JoinTeam(context.Background(), joiner.ID, result.Team.ID, result.InviteCode)
+	if err == nil || errors.Is(err, ErrInvalidInvite) || !errors.Is(err, ErrStoreInconsistent) {
+		t.Fatalf("JoinTeam() error = %v; want internal storage error, not ErrInvalidInvite", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, joiner.ID, false)
+	assertUserTeamIndex(t, rdb, joiner.ID, result.Team.ID, false)
+}
+
+type teamMutationState struct {
+	team        map[string]string
+	members     map[string]string
+	ownerTeams  []string
+	targetTeams []string
+}
+
+func snapshotTeamMutationState(t *testing.T, rdb *redis.Client, teamID, ownerID, targetID string) teamMutationState {
+	t.Helper()
+	ctx := context.Background()
+	team, err := rdb.HGetAll(ctx, teamKey(teamID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	members, err := rdb.HGetAll(ctx, teamMembersKey(teamID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerTeams, err := rdb.SMembers(ctx, userTeamsKey(ownerID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetTeams, err := rdb.SMembers(ctx, userTeamsKey(targetID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(ownerTeams)
+	sort.Strings(targetTeams)
+	return teamMutationState{
+		team:        team,
+		members:     members,
+		ownerTeams:  ownerTeams,
+		targetTeams: targetTeams,
 	}
 }
 

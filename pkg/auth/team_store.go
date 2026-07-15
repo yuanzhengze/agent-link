@@ -98,13 +98,35 @@ redis.call('SREM', KEYS[3], ARGV[2])
 return 1
 `)
 
+var removeOrphanTeamMemberScript = goredis.NewScript(`
+if redis.call('TYPE', KEYS[1]).ok ~= 'hash' then
+  return redis.error_reply('ERR team key must be hash')
+end
+if redis.call('TYPE', KEYS[2]).ok ~= 'hash' then
+  return redis.error_reply('ERR team members key must be hash')
+end
+local user_teams_type = redis.call('TYPE', KEYS[3]).ok
+if user_teams_type ~= 'set' and user_teams_type ~= 'none' then
+  return redis.error_reply('ERR user teams key must be none or set')
+end
+local role = redis.call('HGET', KEYS[2], ARGV[1])
+if role == false then return 0 end
+if role == 'owner' or redis.call('HGET', KEYS[1], 'owner_user_id') == ARGV[1] then return -1 end
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('SREM', KEYS[3], ARGV[2])
+return 1
+`)
+
 func (s *Store) TeamInviteHash(ctx context.Context, teamID string) (string, error) {
 	keyType, err := s.rdb.Type(ctx, teamKey(teamID)).Result()
 	if err != nil {
 		return "", fmt.Errorf("type team: %w", err)
 	}
-	if keyType != "hash" {
+	if keyType == "none" {
 		return "", ErrNotFound
+	}
+	if keyType != "hash" {
+		return "", fmt.Errorf("get team invite hash: team key has type %q: %w", keyType, ErrStoreInconsistent)
 	}
 	hash, err := s.rdb.HGet(ctx, teamKey(teamID), "invite_hash").Result()
 	if errors.Is(err, goredis.Nil) {
@@ -307,6 +329,27 @@ func (s *Store) RemoveUserTeamIndex(ctx context.Context, userID, teamID string) 
 		return fmt.Errorf("remove user team index: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) RemoveOrphanTeamMember(ctx context.Context, teamID, userID string) error {
+	result, err := removeOrphanTeamMemberScript.Run(
+		ctx,
+		s.rdb,
+		[]string{teamKey(teamID), teamMembersKey(teamID), userTeamsKey(userID)},
+		userID,
+		teamID,
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("remove orphan team member: %w", err)
+	}
+	switch result {
+	case 0, 1:
+		return nil
+	case -1:
+		return fmt.Errorf("remove orphan team member %q: owner cannot be removed: %w", userID, ErrStoreInconsistent)
+	default:
+		return fmt.Errorf("remove orphan team member: unexpected result %d", result)
+	}
 }
 
 func (s *Store) ListTeamMembers(ctx context.Context, teamID string) ([]TeamMembership, error) {

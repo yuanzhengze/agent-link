@@ -152,6 +152,131 @@ func TestStoreRoleReturnsErrNotMember(t *testing.T) {
 	}
 }
 
+func TestStoreCreateTeamWrongIndexTypesLeaveNoPartialWrites(t *testing.T) {
+	tests := []struct {
+		name    string
+		corrupt func(t *testing.T, rdb *redis.Client, team Team)
+		assert  func(t *testing.T, rdb *redis.Client, team Team)
+	}{
+		{
+			name: "members key",
+			corrupt: func(t *testing.T, rdb *redis.Client, team Team) {
+				t.Helper()
+				if err := rdb.Set(context.Background(), teamMembersKey(team.ID), "blocked-members", 0).Err(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			assert: func(t *testing.T, rdb *redis.Client, team Team) {
+				t.Helper()
+				assertRedisKeyAbsent(t, rdb, teamKey(team.ID))
+				value, err := rdb.Get(context.Background(), teamMembersKey(team.ID)).Result()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if value != "blocked-members" {
+					t.Fatalf("members key = %q; want original wrong-type value", value)
+				}
+				assertRedisKeyAbsent(t, rdb, userTeamsKey(team.OwnerUserID))
+			},
+		},
+		{
+			name: "owner userTeams key",
+			corrupt: func(t *testing.T, rdb *redis.Client, team Team) {
+				t.Helper()
+				if err := rdb.Set(context.Background(), userTeamsKey(team.OwnerUserID), "blocked-user-teams", 0).Err(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			assert: func(t *testing.T, rdb *redis.Client, team Team) {
+				t.Helper()
+				assertRedisKeyAbsent(t, rdb, teamKey(team.ID))
+				assertRedisKeyAbsent(t, rdb, teamMembersKey(team.ID))
+				value, err := rdb.Get(context.Background(), userTeamsKey(team.OwnerUserID)).Result()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if value != "blocked-user-teams" {
+					t.Fatalf("userTeams key = %q; want original wrong-type value", value)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, rdb := newAuthTestStore(t)
+			owner := newTestUser(t, uniqueTestUsername(t), 1)
+			team := newTestTeam(t, owner.ID)
+			cleanupAuthKeys(t, rdb,
+				userKey(owner.ID),
+				usernameKey(owner.UsernameNormalized),
+				userTeamsKey(owner.ID),
+				teamKey(team.ID),
+				teamMembersKey(team.ID),
+			)
+			if err := store.CreateUser(context.Background(), owner); err != nil {
+				t.Fatal(err)
+			}
+			tt.corrupt(t, rdb, team)
+
+			err := store.CreateTeam(context.Background(), team, "invite-hash")
+			if err == nil || errors.Is(err, ErrTeamExists) {
+				t.Fatalf("CreateTeam() error = %v; want Redis type error", err)
+			}
+			tt.assert(t, rdb, team)
+		})
+	}
+}
+
+func TestStoreCreateTeamExistingKeyStillReturnsErrTeamExists(t *testing.T) {
+	store, rdb := newAuthTestStore(t)
+	owner := newTestUser(t, uniqueTestUsername(t), 1)
+	team := newTestTeam(t, owner.ID)
+	cleanupAuthKeys(t, rdb,
+		userKey(owner.ID),
+		usernameKey(owner.UsernameNormalized),
+		userTeamsKey(owner.ID),
+		teamKey(team.ID),
+		teamMembersKey(team.ID),
+	)
+	if err := store.CreateUser(context.Background(), owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(context.Background(), teamKey(team.ID), "occupied", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(context.Background(), teamMembersKey(team.ID), "wrong-members-type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Set(context.Background(), userTeamsKey(owner.ID), "wrong-user-teams-type", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.CreateTeam(context.Background(), team, "invite-hash"); !errors.Is(err, ErrTeamExists) {
+		t.Fatalf("CreateTeam() error = %v; want ErrTeamExists", err)
+	}
+	if value := rdb.Get(context.Background(), teamKey(team.ID)).Val(); value != "occupied" {
+		t.Fatalf("team key = %q; want occupied", value)
+	}
+	if value := rdb.Get(context.Background(), teamMembersKey(team.ID)).Val(); value != "wrong-members-type" {
+		t.Fatalf("members key = %q; want unchanged", value)
+	}
+	if value := rdb.Get(context.Background(), userTeamsKey(owner.ID)).Val(); value != "wrong-user-teams-type" {
+		t.Fatalf("userTeams key = %q; want unchanged", value)
+	}
+}
+
+func assertRedisKeyAbsent(t *testing.T, rdb *redis.Client, key string) {
+	t.Helper()
+	exists, err := rdb.Exists(context.Background(), key).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists != 0 {
+		t.Fatalf("Redis key %q exists; want absent", key)
+	}
+}
+
 func newAuthTestStore(t *testing.T) (*Store, *redis.Client) {
 	t.Helper()
 	rdb, err := redis.NewClient("localhost:6379")

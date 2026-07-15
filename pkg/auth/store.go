@@ -18,6 +18,7 @@ var (
 	ErrAlreadyMember      = errors.New("already a team member")
 	ErrInvalidInvite      = errors.New("invalid invite")
 	ErrInvalidRole        = errors.New("invalid role")
+	ErrStoreInconsistent  = errors.New("store inconsistent")
 	ErrNotMember          = errors.New("not a team member")
 	ErrForbidden          = errors.New("forbidden")
 	ErrSessionExpired     = errors.New("session expired")
@@ -37,6 +38,14 @@ return 1
 
 var createTeamScript = goredis.NewScript(`
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+local members_type = redis.call('TYPE', KEYS[2]).ok
+if members_type ~= 'none' and members_type ~= 'hash' then
+  return redis.error_reply('ERR team members key must be none or hash')
+end
+local user_teams_type = redis.call('TYPE', KEYS[3]).ok
+if user_teams_type ~= 'none' and user_teams_type ~= 'set' then
+  return redis.error_reply('ERR owner teams key must be none or set')
+end
 redis.call('HSET', KEYS[1],
   'id', ARGV[1], 'name', ARGV[2], 'owner_user_id', ARGV[3],
   'invite_hash', ARGV[4], 'invite_version', '1', 'created_at', ARGV[5])

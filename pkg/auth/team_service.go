@@ -107,6 +107,14 @@ func (s *Service) CreateTeam(ctx context.Context, userID, name string) (CreateTe
 }
 
 func (s *Service) JoinTeam(ctx context.Context, userID, teamID, inviteCode string) (Team, error) {
+	user, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return Team{}, err
+	}
+	if user.Status != "active" {
+		return Team{}, ErrForbidden
+	}
+
 	inviteHash, err := s.store.TeamInviteHash(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -180,6 +188,28 @@ func (s *Service) ListMembers(ctx context.Context, actor Actor) ([]Member, error
 	members := make([]Member, 0, len(memberships))
 	for _, membership := range memberships {
 		user, err := s.store.UserByID(ctx, membership.UserID)
+		if errors.Is(err, ErrNotFound) {
+			switch membership.Role {
+			case RoleOwner:
+				return nil, fmt.Errorf(
+					"list team members: owner user %q is missing: %w",
+					membership.UserID,
+					ErrStoreInconsistent,
+				)
+			case RoleAdmin, RoleMember:
+				if err := s.store.RemoveOrphanTeamMember(ctx, actor.TeamID, membership.UserID); err != nil {
+					return nil, err
+				}
+				continue
+			default:
+				return nil, fmt.Errorf(
+					"list team members: user %q has invalid role %q: %w",
+					membership.UserID,
+					membership.Role,
+					ErrStoreInconsistent,
+				)
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
