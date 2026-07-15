@@ -15,10 +15,16 @@ type TeamMembership struct {
 }
 
 var joinTeamScript = goredis.NewScript(`
-if redis.call('TYPE', KEYS[1]).ok ~= 'hash' then return -2 end
+local team_type = redis.call('TYPE', KEYS[1]).ok
+if team_type == 'none' then return -2 end
+if team_type ~= 'hash' then return -4 end
 if redis.call('TYPE', KEYS[2]).ok ~= 'hash' then return -4 end
 local user_teams_type = redis.call('TYPE', KEYS[3]).ok
 if user_teams_type ~= 'set' and user_teams_type ~= 'none' then return -4 end
+local user_type = redis.call('TYPE', KEYS[4]).ok
+if user_type == 'none' then return -5 end
+if user_type ~= 'hash' then return -4 end
+if redis.call('HGET', KEYS[4], 'status') ~= 'active' then return -3 end
 local invite_hash = redis.call('HGET', KEYS[1], 'invite_hash')
 if invite_hash == false or invite_hash ~= ARGV[2] then return -1 end
 if redis.call('HEXISTS', KEYS[2], ARGV[1]) == 1 then return 0 end
@@ -112,6 +118,7 @@ end
 local role = redis.call('HGET', KEYS[2], ARGV[1])
 if role == false then return 0 end
 if role == 'owner' or redis.call('HGET', KEYS[1], 'owner_user_id') == ARGV[1] then return -1 end
+if redis.call('EXISTS', KEYS[4]) == 1 then return 2 end
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('SREM', KEYS[3], ARGV[2])
 return 1
@@ -145,7 +152,7 @@ func (s *Store) JoinTeam(ctx context.Context, teamID, userID, inviteHash string)
 	result, err := joinTeamScript.Run(
 		ctx,
 		s.rdb,
-		[]string{teamKey(teamID), teamMembersKey(teamID), userTeamsKey(userID)},
+		[]string{teamKey(teamID), teamMembersKey(teamID), userTeamsKey(userID), userKey(userID)},
 		userID,
 		inviteHash,
 		string(RoleMember),
@@ -163,8 +170,12 @@ func (s *Store) JoinTeam(ctx context.Context, teamID, userID, inviteHash string)
 		return ErrInvalidInvite
 	case -2:
 		return ErrInvalidInvite
+	case -3:
+		return ErrForbidden
 	case -4:
-		return fmt.Errorf("join team: corrupt team storage")
+		return fmt.Errorf("join team: corrupt team storage: %w", ErrStoreInconsistent)
+	case -5:
+		return ErrNotFound
 	default:
 		return fmt.Errorf("join team: unexpected result %d", result)
 	}
@@ -335,7 +346,7 @@ func (s *Store) RemoveOrphanTeamMember(ctx context.Context, teamID, userID strin
 	result, err := removeOrphanTeamMemberScript.Run(
 		ctx,
 		s.rdb,
-		[]string{teamKey(teamID), teamMembersKey(teamID), userTeamsKey(userID)},
+		[]string{teamKey(teamID), teamMembersKey(teamID), userTeamsKey(userID), userKey(userID)},
 		userID,
 		teamID,
 	).Int64()
@@ -345,6 +356,8 @@ func (s *Store) RemoveOrphanTeamMember(ctx context.Context, teamID, userID strin
 	switch result {
 	case 0, 1:
 		return nil
+	case 2:
+		return ErrOrphanUserRestored
 	case -1:
 		return fmt.Errorf("remove orphan team member %q: owner cannot be removed: %w", userID, ErrStoreInconsistent)
 	default:

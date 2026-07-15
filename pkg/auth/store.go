@@ -19,6 +19,7 @@ var (
 	ErrInvalidInvite      = errors.New("invalid invite")
 	ErrInvalidRole        = errors.New("invalid role")
 	ErrStoreInconsistent  = errors.New("store inconsistent")
+	ErrOrphanUserRestored = errors.New("orphan user restored")
 	ErrNotMember          = errors.New("not a team member")
 	ErrForbidden          = errors.New("forbidden")
 	ErrSessionExpired     = errors.New("session expired")
@@ -42,6 +43,7 @@ local members_type = redis.call('TYPE', KEYS[2]).ok
 if members_type ~= 'none' and members_type ~= 'hash' then
   return redis.error_reply('ERR team members key must be none or hash')
 end
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
 local user_teams_type = redis.call('TYPE', KEYS[3]).ok
 if user_teams_type ~= 'none' and user_teams_type ~= 'set' then
   return redis.error_reply('ERR owner teams key must be none or set')

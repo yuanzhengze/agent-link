@@ -564,6 +564,260 @@ func TestJoinTeamCorruptRedisTypeReturnsInternalError(t *testing.T) {
 	assertUserTeamIndex(t, rdb, joiner.ID, result.Team.ID, false)
 }
 
+func TestCreateTeamRetriesOrphanMembersHashWithoutMutation(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	orphanID, err := NewTeamID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	successID, err := NewTeamID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	svc, store, rdb := newTeamTestService(t, clock, withTeamIDGenerator(func() (string, error) {
+		if calls.Add(1) == 1 {
+			return orphanID, nil
+		}
+		return successID, nil
+	}))
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	staleOwnerID, err := NewUserID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleMemberID, err := NewUserID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orphanMembers := map[string]string{
+		staleOwnerID:  string(RoleOwner),
+		staleMemberID: string(RoleMember),
+	}
+	cleanupAuthKeys(t, rdb,
+		teamKey(orphanID),
+		teamMembersKey(orphanID),
+		teamKey(successID),
+		teamMembersKey(successID),
+		userTeamsKey(owner.ID),
+	)
+	if err := rdb.HSet(context.Background(), teamMembersKey(orphanID), orphanMembers).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := svc.CreateTeam(context.Background(), owner.ID, "Orphan Retry")
+	if err != nil {
+		t.Fatalf("CreateTeam() error = %v", err)
+	}
+	if result.Team.ID != successID || calls.Load() != 2 {
+		t.Fatalf("CreateTeam() ID/calls = %q/%d; want %q/2", result.Team.ID, calls.Load(), successID)
+	}
+	gotOrphanMembers, err := rdb.HGetAll(context.Background(), teamMembersKey(orphanID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotOrphanMembers, orphanMembers) {
+		t.Fatalf("orphan members changed from %v to %v", orphanMembers, gotOrphanMembers)
+	}
+	assertRedisKeyAbsent(t, rdb, teamKey(orphanID))
+	assertUserTeamIndex(t, rdb, owner.ID, orphanID, false)
+	assertUserTeamIndex(t, rdb, owner.ID, successID, true)
+	role, err := store.Role(context.Background(), successID, owner.ID)
+	if err != nil || role != RoleOwner {
+		t.Fatalf("new team owner role = %q, %v; want owner", role, err)
+	}
+}
+
+func TestCreateTeamFiveOrphanMembersCollisionsLeaveNoNewIndex(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	orphanIDs := make([]string, createTeamMaxAttempts)
+	orphanSnapshots := make(map[string]map[string]string, createTeamMaxAttempts)
+	for i := range orphanIDs {
+		id, err := NewTeamID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		staleMemberID, err := NewUserID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		orphanIDs[i] = id
+		orphanSnapshots[id] = map[string]string{staleMemberID: string(RoleMember)}
+	}
+	var calls atomic.Int32
+	svc, _, rdb := newTeamTestService(t, clock, withTeamIDGenerator(func() (string, error) {
+		index := int(calls.Add(1)) - 1
+		if index >= len(orphanIDs) {
+			return orphanIDs[len(orphanIDs)-1], nil
+		}
+		return orphanIDs[index], nil
+	}))
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	keys := []string{userTeamsKey(owner.ID)}
+	for _, id := range orphanIDs {
+		keys = append(keys, teamKey(id), teamMembersKey(id))
+		if err := rdb.HSet(context.Background(), teamMembersKey(id), orphanSnapshots[id]).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupAuthKeys(t, rdb, keys...)
+
+	if _, err := svc.CreateTeam(context.Background(), owner.ID, "All Orphans"); !errors.Is(err, ErrTeamExists) {
+		t.Fatalf("CreateTeam() error = %v; want exhausted ErrTeamExists", err)
+	}
+	if calls.Load() != createTeamMaxAttempts {
+		t.Fatalf("team ID generator calls = %d; want %d", calls.Load(), createTeamMaxAttempts)
+	}
+	ownerTeams, err := rdb.SMembers(context.Background(), userTeamsKey(owner.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ownerTeams) != 0 {
+		t.Fatalf("owner team index = %v; want no new entries", ownerTeams)
+	}
+	for _, id := range orphanIDs {
+		assertRedisKeyAbsent(t, rdb, teamKey(id))
+		got, err := rdb.HGetAll(context.Background(), teamMembersKey(id)).Result()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, orphanSnapshots[id]) {
+			t.Fatalf("orphan members for %s changed from %v to %v", id, orphanSnapshots[id], got)
+		}
+	}
+}
+
+func TestRemoveOrphanMemberPreservesRecoveredUser(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Recovered Orphan")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+	userFields, err := rdb.HGetAll(context.Background(), userKey(member.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Del(context.Background(), userKey(member.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UserByID(context.Background(), member.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("UserByID() after delete error = %v; want ErrNotFound", err)
+	}
+	if err := rdb.HSet(context.Background(), userKey(member.ID), userFields).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.RemoveOrphanTeamMember(context.Background(), result.Team.ID, member.ID)
+	if !errors.Is(err, ErrOrphanUserRestored) || !strings.Contains(err.Error(), "restored") {
+		t.Errorf("RemoveOrphanTeamMember() error = %v; want dedicated restored-user result", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, member.ID, true)
+	assertUserTeamIndex(t, rdb, member.ID, result.Team.ID, true)
+}
+
+func TestListMembersRequiresTeamHashBeforeMembership(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Missing Team Hash")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+	if err := rdb.Del(context.Background(), teamKey(result.Team.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.ListMembers(context.Background(), teamActor(owner, result.Team.ID, RoleOwner)); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListMembers() error = %v; want ErrNotFound", err)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, owner.ID, true)
+	assertMemberIndex(t, rdb, result.Team.ID, member.ID, true)
+	assertUserTeamIndex(t, rdb, owner.ID, result.Team.ID, true)
+	assertUserTeamIndex(t, rdb, member.ID, result.Team.ID, true)
+}
+
+func TestStoreJoinTeamRechecksUserActiveBeforeWriting(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Join Recheck")
+
+	t.Run("inactive", func(t *testing.T) {
+		user := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+		if err := store.SetUserStatus(context.Background(), user.ID, "inactive"); err != nil {
+			t.Fatal(err)
+		}
+		err := store.JoinTeam(context.Background(), result.Team.ID, user.ID, SecretHash(result.InviteCode))
+		if !errors.Is(err, ErrForbidden) {
+			t.Errorf("JoinTeam() inactive error = %v; want ErrForbidden", err)
+		}
+		assertMemberIndex(t, rdb, result.Team.ID, user.ID, false)
+		assertUserTeamIndex(t, rdb, user.ID, result.Team.ID, false)
+	})
+
+	t.Run("missing", func(t *testing.T) {
+		user := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+		if err := rdb.Del(context.Background(), userKey(user.ID)).Err(); err != nil {
+			t.Fatal(err)
+		}
+		err := store.JoinTeam(context.Background(), result.Team.ID, user.ID, SecretHash(result.InviteCode))
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("JoinTeam() missing user error = %v; want ErrNotFound", err)
+		}
+		assertMemberIndex(t, rdb, result.Team.ID, user.ID, false)
+		assertUserTeamIndex(t, rdb, user.ID, result.Team.ID, false)
+	})
+}
+
+func TestListMembersCleansOrphanAdmin(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Orphan Admin")
+	joinTestTeam(t, svc, admin, result.Team.ID, result.InviteCode)
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), admin.ID, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Del(context.Background(), userKey(admin.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	members, err := svc.ListMembers(context.Background(), teamActor(owner, result.Team.ID, RoleOwner))
+	if err != nil {
+		t.Fatalf("ListMembers() error = %v", err)
+	}
+	if len(members) != 1 || members[0].UserID != owner.ID {
+		t.Fatalf("ListMembers() = %+v; want only owner", members)
+	}
+	assertMemberIndex(t, rdb, result.Team.ID, admin.ID, false)
+	assertUserTeamIndex(t, rdb, admin.ID, result.Team.ID, false)
+}
+
+func TestRemoveOrphanMemberFailsClosedWhenOwnerIDPointsToTarget(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newTeamTestService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Owner ID Guard")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+	if err := rdb.HSet(context.Background(), teamKey(result.Team.ID), "owner_user_id", member.ID).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.Del(context.Background(), userKey(member.ID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.RemoveOrphanTeamMember(context.Background(), result.Team.ID, member.ID); !errors.Is(err, ErrStoreInconsistent) {
+		t.Fatalf("RemoveOrphanTeamMember() error = %v; want ErrStoreInconsistent", err)
+	}
+	role, err := store.Role(context.Background(), result.Team.ID, member.ID)
+	if err != nil || role != RoleMember {
+		t.Fatalf("target role = %q, %v; want preserved member", role, err)
+	}
+	assertUserTeamIndex(t, rdb, member.ID, result.Team.ID, true)
+}
+
 type teamMutationState struct {
 	team        map[string]string
 	members     map[string]string

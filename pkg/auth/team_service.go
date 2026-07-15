@@ -178,6 +178,9 @@ func (s *Service) ListMembers(ctx context.Context, actor Actor) ([]Member, error
 	if err := validateActor(actor); err != nil {
 		return nil, err
 	}
+	if _, err := s.store.Team(ctx, actor.TeamID); err != nil {
+		return nil, err
+	}
 	if _, err := s.store.Role(ctx, actor.TeamID, actor.UserID); err != nil {
 		return nil, err
 	}
@@ -197,10 +200,22 @@ func (s *Service) ListMembers(ctx context.Context, actor Actor) ([]Member, error
 					ErrStoreInconsistent,
 				)
 			case RoleAdmin, RoleMember:
-				if err := s.store.RemoveOrphanTeamMember(ctx, actor.TeamID, membership.UserID); err != nil {
-					return nil, err
+				pruneErr := s.store.RemoveOrphanTeamMember(ctx, actor.TeamID, membership.UserID)
+				if pruneErr == nil {
+					continue
 				}
-				continue
+				if !errors.Is(pruneErr, ErrOrphanUserRestored) {
+					return nil, pruneErr
+				}
+				user, err = s.store.UserByID(ctx, membership.UserID)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"list team members: restored user %q cannot be loaded (%v): %w",
+						membership.UserID,
+						err,
+						ErrStoreInconsistent,
+					)
+				}
 			default:
 				return nil, fmt.Errorf(
 					"list team members: user %q has invalid role %q: %w",
