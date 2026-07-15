@@ -157,15 +157,7 @@ func TestSessionIndexScoresUseUnixMilliseconds(t *testing.T) {
 		cleanupAuthKeys(t, rdb, deviceSessionKey(hash))
 
 		createdAt := time.Now().UTC().Truncate(time.Millisecond)
-		if err := store.CreateDeviceSession(context.Background(), hash, DeviceSession{
-			UserID:          user.ID,
-			DeviceID:        "device-id",
-			PasswordVersion: user.PasswordVersion,
-			CreatedAt:       createdAt,
-			LastSeenAt:      createdAt,
-		}); err != nil {
-			t.Fatal(err)
-		}
+		createDeviceSessionForTest(t, store, rdb, user, hash, "device-id", createdAt)
 		assertSessionIndexScoreMatchesExpiry(
 			t,
 			rdb,
@@ -202,9 +194,7 @@ func TestDeviceSessionResolveAndRevoke(t *testing.T) {
 		LastSeenAt:      createdAt,
 	}
 	beforeCreate := time.Now()
-	if err := store.CreateDeviceSession(context.Background(), hash, session); err != nil {
-		t.Fatal(err)
-	}
+	createDeviceSessionForTest(t, store, rdb, user, hash, session.DeviceID, createdAt)
 	afterCreate := time.Now()
 	assertTTLNear(t, rdb, deviceSessionKey(hash), DeviceSessionIdleTTL)
 	assertZScoreBetween(
@@ -270,15 +260,7 @@ func TestPasswordVersionInvalidatesSessions(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateDeviceSession(context.Background(), deviceHash, DeviceSession{
-		UserID:          user.ID,
-		DeviceID:        "device-id",
-		PasswordVersion: user.PasswordVersion,
-		CreatedAt:       now,
-		LastSeenAt:      now,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	createDeviceSessionForTest(t, store, rdb, user, deviceHash, "device-id", now)
 	if err := rdb.HSet(context.Background(), userKey(user.ID), "password_version", user.PasswordVersion+1).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -405,15 +387,7 @@ func TestSessionIndexesPruneExpiredMembers(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateDeviceSession(ctx, deviceHash, DeviceSession{
-		UserID:          user.ID,
-		DeviceID:        "device-id",
-		PasswordVersion: user.PasswordVersion,
-		CreatedAt:       now,
-		LastSeenAt:      now,
-	}); err != nil {
-		t.Fatal(err)
-	}
+	createDeviceSessionForTest(t, store, rdb, user, deviceHash, "device-id", now)
 	assertZMemberGone(t, rdb, userWebSessionsKey(user.ID), staleWeb)
 	assertZMemberGone(t, rdb, userDeviceSessionsKey(user.ID), staleDevice)
 
@@ -573,6 +547,42 @@ func createSessionTestUser(t *testing.T, store *Store, rdb *redis.Client, passwo
 		t.Fatal(err)
 	}
 	return user
+}
+
+func createDeviceSessionForTest(
+	t *testing.T,
+	store *Store,
+	rdb *redis.Client,
+	user User,
+	hash string,
+	deviceID string,
+	createdAt time.Time,
+) {
+	t.Helper()
+	if deviceID == "" {
+		var err error
+		deviceID, err = NewDeviceID()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	cleanupAuthKeys(t, rdb, deviceKey(deviceID))
+	if err := store.CreateDeviceCredential(context.Background(), Device{
+		ID:          deviceID,
+		UserID:      user.ID,
+		Name:        "test-device",
+		SessionHash: hash,
+		CreatedAt:   createdAt,
+		LastSeenAt:  createdAt,
+	}, hash, DeviceSession{
+		UserID:          user.ID,
+		DeviceID:        deviceID,
+		PasswordVersion: user.PasswordVersion,
+		CreatedAt:       createdAt,
+		LastSeenAt:      createdAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func uniqueSessionHash(t *testing.T, prefix string) string {

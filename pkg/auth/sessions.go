@@ -114,6 +114,22 @@ redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
 
 local values = redis.call('HMGET', KEYS[1],
   'device_id', 'password_version', 'created_at')
+local device_id = values[1]
+if not device_id then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', index_key, ARGV[5])
+  return {0}
+end
+
+local device_key = ARGV[6] .. device_id
+local device_user = redis.call('HGET', device_key, 'user_id')
+local device_session_hash = redis.call('HGET', device_key, 'session_hash')
+if not device_user or device_user ~= user_id or device_session_hash ~= ARGV[5] then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', index_key, ARGV[5])
+  return {0}
+end
+
 local current_version = redis.call('HGET', ARGV[3] .. user_id, 'password_version')
 if not current_version or current_version ~= values[2] then
   redis.call('DEL', KEYS[1])
@@ -122,9 +138,10 @@ if not current_version or current_version ~= values[2] then
 end
 
 redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
+redis.call('HSET', device_key, 'last_seen_at', ARGV[1])
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
 redis.call('ZADD', index_key, redis_now_ms + tonumber(ARGV[2]), ARGV[5])
-return {1, user_id, values[1], values[2], values[3], ARGV[1]}
+return {1, user_id, device_id, values[2], values[3], ARGV[1]}
 `)
 
 var revokeSessionScript = goredis.NewScript(`
@@ -274,6 +291,7 @@ func (s *Store) ResolveDeviceSession(ctx context.Context, sessionHash string, no
 		sessionUserKeyPrefix,
 		deviceSessionIndexSuffix,
 		sessionHash,
+		"agentlink:v2:device:",
 	).Slice()
 	if err != nil {
 		return DeviceSession{}, fmt.Errorf("resolve device session: %w", err)

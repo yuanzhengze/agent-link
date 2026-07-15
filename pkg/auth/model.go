@@ -38,3 +38,12 @@ type Team struct {
 	OwnerUserID string
 	CreatedAt   time.Time
 }
+
+type Device struct {
+	ID          string
+	UserID      string
+	Name        string
+	SessionHash string
+	CreatedAt   time.Time
+	LastSeenAt  time.Time
+}

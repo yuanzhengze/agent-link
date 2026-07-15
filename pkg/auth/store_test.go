@@ -166,6 +166,13 @@ func newAuthTestStore(t *testing.T) (*Store, *redis.Client) {
 	return NewStore(rdb), rdb
 }
 
+func clearAuthKeys(t *testing.T, rdb *redis.Client, keys ...string) {
+	t.Helper()
+	if err := rdb.Del(context.Background(), keys...).Err(); err != nil {
+		t.Fatalf("clear test Redis keys: %v", err)
+	}
+}
+
 func cleanupAuthKeys(t *testing.T, rdb *redis.Client, keys ...string) {
 	t.Helper()
 	t.Cleanup(func() {

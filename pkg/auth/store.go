@@ -12,11 +12,13 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("not found")
-	ErrUsernameExists = errors.New("username already exists")
-	ErrNotMember      = errors.New("not a team member")
-	ErrForbidden      = errors.New("forbidden")
-	ErrSessionExpired = errors.New("session expired")
+	ErrNotFound           = errors.New("not found")
+	ErrUsernameExists     = errors.New("username already exists")
+	ErrNotMember          = errors.New("not a team member")
+	ErrForbidden          = errors.New("forbidden")
+	ErrSessionExpired     = errors.New("session expired")
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrRateLimited        = errors.New("rate limited")
 )
 
 var createUserScript = goredis.NewScript(`
@@ -97,6 +99,21 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 		return User{}, ErrNotFound
 	}
 
+	return s.userFromFields(ctx, id, fields)
+}
+
+func (s *Store) UserByID(ctx context.Context, id string) (User, error) {
+	fields, err := s.rdb.HGetAll(ctx, userKey(id)).Result()
+	if err != nil {
+		return User{}, fmt.Errorf("get user: %w", err)
+	}
+	if len(fields) == 0 {
+		return User{}, ErrNotFound
+	}
+	return s.userFromFields(ctx, id, fields)
+}
+
+func (s *Store) userFromFields(_ context.Context, id string, fields map[string]string) (User, error) {
 	passwordVersion, err := parseRedisInt64(fields["password_version"], "password_version")
 	if err != nil {
 		return User{}, err
@@ -109,8 +126,12 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 	if err != nil {
 		return User{}, err
 	}
+	userID := fields["id"]
+	if userID == "" {
+		userID = id
+	}
 	return User{
-		ID:                 fields["id"],
+		ID:                 userID,
 		Username:           fields["username"],
 		UsernameNormalized: fields["username_normalized"],
 		PasswordPHC:        fields["password_phc"],
@@ -119,6 +140,13 @@ func (s *Store) UserByUsername(ctx context.Context, username string) (User, erro
 		MustChangePassword: mustChangePassword,
 		CreatedAt:          createdAt,
 	}, nil
+}
+
+func (s *Store) SetUserStatus(ctx context.Context, userID, status string) error {
+	if err := s.rdb.HSet(ctx, userKey(userID), "status", status).Err(); err != nil {
+		return fmt.Errorf("set user status: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CreateTeam(ctx context.Context, team Team, inviteHash string) error {
