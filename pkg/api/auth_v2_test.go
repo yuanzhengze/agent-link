@@ -538,11 +538,55 @@ func TestAuthMustChangePasswordSessionIsRestricted(t *testing.T) {
 		t.Fatalf("expected password change required, got %q", errResp["error"])
 	}
 
-	meResp, _ := authJSON(t, http.MethodGet, "/api/auth/me", nil, map[string]string{
+	meResp, meBody := authJSON(t, http.MethodGet, "/api/auth/me", nil, map[string]string{
 		"Cookie": withCookies(loginResp),
 	})
 	if meResp.StatusCode != http.StatusOK {
-		t.Fatalf("me should be allowed, got %d", meResp.StatusCode)
+		t.Fatalf("me should be allowed, got %d body=%s", meResp.StatusCode, meBody)
+	}
+	sessionCookie := cookieByName(loginResp.Cookies(), sessionCookieName)
+	rotatedCSRF := cookieByName(meResp.Cookies(), csrfCookieName)
+	if sessionCookie == nil || rotatedCSRF == nil || rotatedCSRF.Value == "" {
+		t.Fatal("must-change web flow missing session or rotated csrf cookie")
+	}
+
+	webLogoutResp, webLogoutBody := authJSON(
+		t,
+		http.MethodPost,
+		"/api/auth/logout",
+		nil,
+		map[string]string{
+			"Cookie": sessionCookieName + "=" + sessionCookie.Value +
+				"; " + csrfCookieName + "=" + rotatedCSRF.Value,
+			"Origin":       authTestOrigin,
+			"X-CSRF-Token": rotatedCSRF.Value,
+		},
+	)
+	if webLogoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf(
+			"must-change web logout expected 204, got %d body=%s",
+			webLogoutResp.StatusCode,
+			webLogoutBody,
+		)
+	}
+	for _, name := range []string{sessionCookieName, csrfCookieName} {
+		if cookie := cookieByName(webLogoutResp.Cookies(), name); cookie == nil || cookie.MaxAge != -1 {
+			t.Fatalf("must-change web logout should clear %s cookie", name)
+		}
+	}
+	revokedWebMeResp, revokedWebMeBody := authJSON(
+		t,
+		http.MethodGet,
+		"/api/auth/me",
+		nil,
+		map[string]string{"Cookie": withCookies(loginResp)},
+	)
+	if revokedWebMeResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf(
+			"logged-out must-change web me expected 401, got %d body=%s",
+			revokedWebMeResp.StatusCode,
+			revokedWebMeBody,
+		)
 	}
 
 	deviceResp, deviceBody := authJSON(t, http.MethodPost, "/api/auth/device-login", map[string]string{
