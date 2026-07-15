@@ -6,17 +6,30 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
+	"time"
 
+	"github.com/team/agentlink/pkg/auth"
 	"github.com/team/agentlink/pkg/redis"
 	"github.com/team/agentlink/web"
 )
 
-type contextKey string
+type legacyContextKey string
 
 const (
-	contextKeyDevice contextKey = "device"
+	contextKeyDevice legacyContextKey = "device"
 )
+
+type ServerOptions struct {
+	Addr             string
+	DataDir          string
+	Redis            *redis.Client
+	CookieSecure     bool
+	PublicURL        string
+	RegisterPassword string
+}
 
 type Server struct {
 	rdb              *redis.Client
@@ -24,9 +37,12 @@ type Server struct {
 	dataDir          string
 	mux              *http.ServeMux
 	srv              *http.Server
-	hub              Broadcaster // set by Task 4 (WebSocket Hub); nil-guarded until then
-	projMu           sync.Map    // projectID -> *sync.Mutex, serializes writes+commits per project
-	previewToken     string      // read-only token for unauthenticated preview pages to subscribe over /ws (Task 6)
+	hub              Broadcaster
+	projMu           sync.Map
+	previewToken     string
+	authService      *auth.Service
+	cookieSecure     bool
+	publicOrigin     string
 }
 
 // generatePreviewToken returns a random 32-byte hex-encoded token used to
@@ -40,20 +56,43 @@ func generatePreviewToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Server {
+func parsePublicOrigin(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid public URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid public URL: missing scheme or host")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("invalid public URL: path not allowed")
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
+func NewWithOptions(opts ServerOptions) *Server {
+	publicOrigin, err := parsePublicOrigin(opts.PublicURL)
+	if err != nil {
+		panic(err)
+	}
+
 	previewToken, err := generatePreviewToken()
 	if err != nil {
-		// crypto/rand failure is unrecoverable; a preview token is required
-		// for the live-reload feature to work safely.
 		panic(fmt.Sprintf("failed to generate preview token: %v", err))
 	}
 
+	store := auth.NewStore(opts.Redis)
+	authService := auth.NewService(store, realClock{})
+
 	s := &Server{
-		rdb:              rdb,
-		registerPassword: registerPassword,
-		dataDir:          dataDir,
+		rdb:              opts.Redis,
+		registerPassword: opts.RegisterPassword,
+		dataDir:          opts.DataDir,
 		mux:              http.NewServeMux(),
 		previewToken:     previewToken,
+		authService:      authService,
+		cookieSecure:     opts.CookieSecure,
+		publicOrigin:     publicOrigin,
 	}
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
@@ -83,19 +122,44 @@ func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Serv
 	s.mux.HandleFunc("GET /projects/{id}/snapshot", s.handleSnapshot)
 	s.mux.HandleFunc("GET /preview/{id}/{path...}", s.handlePreview)
 
-	hub := NewHub(rdb)
+	s.mux.HandleFunc("POST /api/auth/register", s.handleAuthRegister)
+	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
+	s.mux.Handle("POST /api/auth/logout", s.requireIdentity(http.HandlerFunc(s.handleAuthLogout)))
+	s.mux.Handle("GET /api/auth/me", s.requireIdentity(http.HandlerFunc(s.handleAuthMe)))
+	s.mux.Handle("POST /api/auth/change-password", s.requireIdentity(http.HandlerFunc(s.handleAuthChangePassword)))
+	s.mux.HandleFunc("POST /api/auth/device-login", s.handleDeviceLogin)
+	s.mux.HandleFunc("POST /api/auth/device-logout", s.handleDeviceLogout)
+	s.mux.Handle("GET /api/auth/test-protected", s.requireIdentity(http.HandlerFunc(s.handleAuthTestProtected)))
+	s.mux.Handle("GET /api/auth/test-actor", s.requireIdentity(http.HandlerFunc(s.handleAuthTestActor)))
+
+	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken
 	s.hub = hub
 	s.mux.HandleFunc("GET /ws", hub.handleWS)
 
-	// Catch-all: serves the cowork GUI (index.html/app.js/style.css) from
-	// the embedded web.FS. Go 1.22 ServeMux gives more-specific patterns
-	// precedence, so every route registered above still wins; only
-	// unmatched paths fall through to the file server.
 	s.mux.Handle("GET /", http.FileServer(http.FS(web.FS)))
 
 	return s
 }
+
+func New(addr, dataDir string, rdb *redis.Client, registerPassword string) *Server {
+	publicURL := "http://localhost:8080"
+	if addr != "" && strings.HasPrefix(addr, ":") {
+		publicURL = "http://localhost" + addr
+	}
+	return NewWithOptions(ServerOptions{
+		Addr:             addr,
+		DataDir:          dataDir,
+		Redis:            rdb,
+		CookieSecure:     false,
+		PublicURL:        publicURL,
+		RegisterPassword: registerPassword,
+	})
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
 
 func (s *Server) ListenAndServe(addr string) error {
 	s.srv = &http.Server{

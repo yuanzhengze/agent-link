@@ -32,7 +32,14 @@ func main() {
 		dataDir = "./data"
 	}
 
-	srv := api.New(addr, dataDir, rdb, cfg.RegisterPassword)
+	srv := api.NewWithOptions(api.ServerOptions{
+		Addr:             addr,
+		DataDir:          dataDir,
+		Redis:            rdb,
+		CookieSecure:     cfg.CookieSecure,
+		PublicURL:        cfg.PublicURL,
+		RegisterPassword: cfg.RegisterPassword,
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

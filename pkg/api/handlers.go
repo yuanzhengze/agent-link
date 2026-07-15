@@ -1047,7 +1047,6 @@ func (s *Server) handleTaskResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-
 	issuedBy, _ := s.rdb.HGet(r.Context(), taskKey, "issued_by").Result()
 	issuedParts := strings.SplitN(issuedBy, ":", 2)
 	if len(issuedParts) == 2 {
@@ -1207,7 +1206,6 @@ func (s *Server) handleTaskCancel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-
 	issuedBy, _ := s.rdb.HGet(r.Context(), taskKey, "issued_by").Result()
 	issuedParts := strings.SplitN(issuedBy, ":", 2)
 	if len(issuedParts) == 2 {
@@ -1304,12 +1302,12 @@ func (s *Server) handleTaskReopen(w http.ResponseWriter, r *http.Request) {
 	inboxContent := "[重发原因: " + req.Reason + "]\n" + taskData["content"]
 	id := generateID()
 	inboxItem := Message{
-		ID:         id,
-		Type:       MsgTypeTask,
-		TaskID:     req.TaskID,
-		Title:      taskData["title"],
-		Content:    inboxContent,
-		CreatedAt:  now,
+		ID:        id,
+		Type:      MsgTypeTask,
+		TaskID:    req.TaskID,
+		Title:     taskData["title"],
+		Content:   inboxContent,
+		CreatedAt: now,
 	}
 	if len(issuedParts) == 2 {
 		inboxItem.FromDevice = issuedParts[0]
@@ -1527,6 +1525,9 @@ func (s *Server) writeBusyError(w http.ResponseWriter, ctx context.Context, devi
 // or /locks/acquire — those still require the token, and the GUI supplies
 // it client-side (see web/app.js) once loaded.
 func skipAuth(path string) bool {
+	if strings.HasPrefix(path, "/api/") {
+		return true
+	}
 	if path == "/health" || path == "/agents/register" || path == "/ws" || strings.HasPrefix(path, "/preview/") {
 		return true
 	}

@@ -159,6 +159,24 @@ func (s *Service) DeviceLogin(ctx context.Context, input DeviceLoginInput) (Devi
 	}, nil
 }
 
+func (s *Service) RotateWebCSRF(ctx context.Context, sessionSecret string) (User, WebSession, string, error) {
+	user, session, err := s.ResolveWebSession(ctx, sessionSecret)
+	if err != nil {
+		return User{}, WebSession{}, "", err
+	}
+	csrfSecret, err := NewSecret("csrf_", 32)
+	if err != nil {
+		return User{}, WebSession{}, "", err
+	}
+	sessionHash := SecretHash(sessionSecret)
+	newCSRFHash := SecretHash(csrfSecret)
+	if err := s.store.RotateWebCSRF(ctx, sessionHash, newCSRFHash); err != nil {
+		return User{}, WebSession{}, "", err
+	}
+	session.CSRFHash = newCSRFHash
+	return user, session, csrfSecret, nil
+}
+
 func (s *Service) ResolveDeviceSession(ctx context.Context, credential string) (User, DeviceSession, error) {
 	sessionHash := SecretHash(credential)
 	session, err := s.store.ResolveDeviceSession(ctx, sessionHash, s.clock.Now().UTC())
@@ -169,6 +187,14 @@ func (s *Service) ResolveDeviceSession(ctx context.Context, credential string) (
 	if err != nil {
 		return User{}, DeviceSession{}, err
 	}
+	device, err := s.store.Device(ctx, session.DeviceID)
+	if err != nil {
+		return User{}, DeviceSession{}, err
+	}
+	if device.UserID != user.ID || device.SessionHash != sessionHash {
+		return User{}, DeviceSession{}, ErrSessionExpired
+	}
+	session.DeviceName = device.Name
 	return user, session, nil
 }
 

@@ -156,6 +156,54 @@ func TestServiceRegisterHashesPassword(t *testing.T) {
 	}
 }
 
+func TestServiceRotateWebCSRF(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newAuthService(t, clock)
+	username := uniqueTestUsername(t)
+	registerServiceUser(t, svc, username, "correct horse battery staple")
+	result := loginWebSession(t, svc, username, "correct horse battery staple", "203.0.113.1")
+
+	before, err := store.ResolveWebSession(context.Background(), secretHash(result.SessionSecret), clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	user, session, newCSRFSecret, err := svc.RotateWebCSRF(context.Background(), result.SessionSecret)
+	if err != nil {
+		t.Fatalf("RotateWebCSRF() error = %v", err)
+	}
+	if user.ID != result.User.ID || session.CSRFHash != secretHash(newCSRFSecret) {
+		t.Fatalf("RotateWebCSRF() = user %+v session %+v; want rotated csrf", user, session)
+	}
+	if session.CSRFHash == before.CSRFHash {
+		t.Fatal("csrf hash should change")
+	}
+
+	if err := svc.LogoutWeb(context.Background(), result.SessionSecret); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := svc.RotateWebCSRF(context.Background(), result.SessionSecret); !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("RotateWebCSRF() after logout error = %v; want ErrSessionExpired", err)
+	}
+	_ = rdb
+}
+
+func TestServiceResolveDeviceSessionLoadsDeviceName(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, _ := newAuthService(t, clock)
+	username := uniqueTestUsername(t)
+	registerServiceUser(t, svc, username, "correct horse battery staple")
+	result := loginDeviceSession(t, svc, username, "correct horse battery staple", "203.0.113.2", "alpha-station")
+
+	_, session, err := svc.ResolveDeviceSession(context.Background(), result.DeviceCredential)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.DeviceName != "alpha-station" {
+		t.Fatalf("DeviceName = %q; want alpha-station", session.DeviceName)
+	}
+}
+
 func TestServiceLoginReturnsGenericInvalidCredentials(t *testing.T) {
 	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
 	svc, _, rdb := newAuthService(t, clock)

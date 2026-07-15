@@ -29,6 +29,7 @@ type WebSession struct {
 type DeviceSession struct {
 	UserID          string
 	DeviceID        string
+	DeviceName      string // actor-only; loaded from persistent device record
 	PasswordVersion int64
 	CreatedAt       time.Time
 	LastSeenAt      time.Time
@@ -186,6 +187,12 @@ end
 local index_key = ARGV[1] .. user_id .. ARGV[2]
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', index_key, ARGV[3])
+return 1
+`)
+
+var rotateWebCSRFScript = goredis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HSET', KEYS[1], 'csrf_hash', ARGV[1])
 return 1
 `)
 
@@ -370,6 +377,22 @@ func (s *Store) RevokeDeviceSession(ctx context.Context, sessionHash string) err
 		sessionHash,
 	).Err(); err != nil {
 		return fmt.Errorf("revoke device session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RotateWebCSRF(ctx context.Context, sessionHash, newCSRFHash string) error {
+	updated, err := rotateWebCSRFScript.Run(
+		ctx,
+		s.rdb,
+		[]string{webSessionKey(sessionHash)},
+		newCSRFHash,
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("rotate web csrf: %w", err)
+	}
+	if updated == 0 {
+		return ErrSessionExpired
 	}
 	return nil
 }
