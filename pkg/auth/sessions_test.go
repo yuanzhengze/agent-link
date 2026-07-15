@@ -77,6 +77,116 @@ func TestWebSessionResolveAndRevoke(t *testing.T) {
 	}
 }
 
+func TestWebSessionResolveUsesRedisTimeForExpiry(t *testing.T) {
+	store, rdb := newAuthTestStore(t)
+	user := createSessionTestUser(t, store, rdb, 1)
+	hash := uniqueSessionHash(t, "web_")
+	cleanupAuthKeys(t, rdb, webSessionKey(hash))
+
+	createdAt := time.Now().UTC().Truncate(time.Millisecond)
+	if err := store.CreateWebSession(context.Background(), hash, WebSession{
+		UserID:            user.ID,
+		CSRFHash:          "csrf-hash",
+		PasswordVersion:   user.PasswordVersion,
+		CreatedAt:         createdAt,
+		LastSeenAt:        createdAt,
+		AbsoluteExpiresAt: createdAt.Add(WebSessionAbsoluteTTL),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	futureLastSeen := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+	resolved, err := store.ResolveWebSession(context.Background(), hash, futureLastSeen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolved.LastSeenAt.Equal(futureLastSeen) {
+		t.Fatalf("LastSeenAt = %s; want caller-provided %s", resolved.LastSeenAt, futureLastSeen)
+	}
+	ttl, err := rdb.PTTL(context.Background(), webSessionKey(hash)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl < WebSessionIdleTTL-5*time.Second || ttl > WebSessionIdleTTL {
+		t.Fatalf("web session TTL after +1h LastSeenAt = %s; want Redis-based TTL within 5s of %s", ttl, WebSessionIdleTTL)
+	}
+}
+
+func TestSessionIndexScoresUseUnixMilliseconds(t *testing.T) {
+	t.Run("web create and resolve", func(t *testing.T) {
+		store, rdb := newAuthTestStore(t)
+		user := createSessionTestUser(t, store, rdb, 1)
+		hash := uniqueSessionHash(t, "web_")
+		cleanupAuthKeys(t, rdb, webSessionKey(hash))
+
+		createdAt := time.Now().UTC().Truncate(time.Millisecond)
+		if err := store.CreateWebSession(context.Background(), hash, WebSession{
+			UserID:            user.ID,
+			CSRFHash:          "csrf-hash",
+			PasswordVersion:   user.PasswordVersion,
+			CreatedAt:         createdAt,
+			LastSeenAt:        createdAt,
+			AbsoluteExpiresAt: createdAt.Add(WebSessionAbsoluteTTL),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			webSessionKey(hash),
+			userWebSessionsKey(user.ID),
+			hash,
+		)
+
+		if _, err := store.ResolveWebSession(context.Background(), hash, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			webSessionKey(hash),
+			userWebSessionsKey(user.ID),
+			hash,
+		)
+	})
+
+	t.Run("device create and resolve", func(t *testing.T) {
+		store, rdb := newAuthTestStore(t)
+		user := createSessionTestUser(t, store, rdb, 1)
+		hash := uniqueSessionHash(t, "device_")
+		cleanupAuthKeys(t, rdb, deviceSessionKey(hash))
+
+		createdAt := time.Now().UTC().Truncate(time.Millisecond)
+		if err := store.CreateDeviceSession(context.Background(), hash, DeviceSession{
+			UserID:          user.ID,
+			DeviceID:        "device-id",
+			PasswordVersion: user.PasswordVersion,
+			CreatedAt:       createdAt,
+			LastSeenAt:      createdAt,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			deviceSessionKey(hash),
+			userDeviceSessionsKey(user.ID),
+			hash,
+		)
+
+		if _, err := store.ResolveDeviceSession(context.Background(), hash, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			deviceSessionKey(hash),
+			userDeviceSessionsKey(user.ID),
+			hash,
+		)
+	})
+}
+
 func TestDeviceSessionResolveAndRevoke(t *testing.T) {
 	store, rdb := newAuthTestStore(t)
 	user := createSessionTestUser(t, store, rdb, 2)
@@ -212,12 +322,35 @@ func TestWebSessionHonorsAbsoluteExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int64(score) != absoluteExpiry.Unix() {
-		t.Fatalf("web session index score = %d; want absolute expiry %d", int64(score), absoluteExpiry.Unix())
+	if int64(score) != absoluteExpiry.UnixMilli() {
+		t.Fatalf("web session index score = %d; want absolute expiry %d", int64(score), absoluteExpiry.UnixMilli())
 	}
 
-	if _, err := store.ResolveWebSession(context.Background(), hash, absoluteExpiry); !errors.Is(err, ErrSessionExpired) {
-		t.Fatalf("ResolveWebSession() at absolute expiry error = %v; want ErrSessionExpired", err)
+	resolved, err := store.ResolveWebSession(context.Background(), hash, absoluteExpiry)
+	if err != nil {
+		t.Fatalf("ResolveWebSession() with future LastSeenAt error = %v; want nil", err)
+	}
+	if !resolved.LastSeenAt.Equal(absoluteExpiry) {
+		t.Fatalf("LastSeenAt = %s; want caller-provided %s", resolved.LastSeenAt, absoluteExpiry)
+	}
+	ttl, err = rdb.PTTL(context.Background(), webSessionKey(hash)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl <= 119*time.Minute || ttl > 2*time.Hour {
+		t.Fatalf("web session TTL after future LastSeenAt = %s; want unchanged absolute cap near 2h", ttl)
+	}
+
+	if err := rdb.HSet(
+		context.Background(),
+		webSessionKey(hash),
+		"absolute_expires_at_unix_ms",
+		time.Now().Add(-time.Millisecond).UnixMilli(),
+	).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ResolveWebSession(context.Background(), hash, createdAt); !errors.Is(err, ErrSessionExpired) {
+		t.Fatalf("ResolveWebSession() with Redis-expired absolute time error = %v; want ErrSessionExpired", err)
 	}
 	assertSessionAndIndexGone(t, rdb, webSessionKey(hash), userWebSessionsKey(user.ID), hash)
 }
@@ -253,7 +386,7 @@ func TestSessionIndexesPruneExpiredMembers(t *testing.T) {
 	ctx := context.Background()
 	staleWeb := uniqueSessionHash(t, "stale_web_")
 	staleDevice := uniqueSessionHash(t, "stale_device_")
-	staleScore := float64(time.Now().Add(-time.Minute).Unix())
+	staleScore := float64(time.Now().Add(-time.Minute).UnixMilli())
 	if err := rdb.ZAdd(ctx, userWebSessionsKey(user.ID), goredis.Z{Score: staleScore, Member: staleWeb}).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +473,26 @@ func TestRevokeAllUserSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	staleScore := float64(time.Now().Add(-time.Minute).Unix())
+	for _, hash := range webHashes {
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			webSessionKey(hash),
+			userWebSessionsKey(user.ID),
+			hash,
+		)
+	}
+	for _, hash := range deviceHashes {
+		assertSessionIndexScoreMatchesExpiry(
+			t,
+			rdb,
+			deviceSessionKey(hash),
+			userDeviceSessionsKey(user.ID),
+			hash,
+		)
+	}
+
+	staleScore := float64(time.Now().Add(-time.Minute).UnixMilli())
 	if err := rdb.ZAdd(context.Background(), userWebSessionsKey(user.ID), goredis.Z{Score: staleScore, Member: "expired-web"}).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -368,6 +520,42 @@ func TestRevokeAllUserSessions(t *testing.T) {
 		if count != 0 {
 			t.Fatalf("session index %q has %d members after revoke-all", indexKey, count)
 		}
+	}
+}
+
+func assertSessionIndexScoreMatchesExpiry(
+	t *testing.T,
+	rdb *redis.Client,
+	sessionKey, indexKey, hash string,
+) {
+	t.Helper()
+	before := time.Now()
+	ttl, err := rdb.PTTL(context.Background(), sessionKey).Result()
+	after := time.Now()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ttl <= 0 {
+		t.Fatalf("PTTL(%q) = %s; want a live session", sessionKey, ttl)
+	}
+	score, err := rdb.ZScore(context.Background(), indexKey, hash).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := int64(score)
+	const tolerance = 2 * time.Second
+	earliest := before.Add(ttl).Add(-tolerance).UnixMilli()
+	latest := after.Add(ttl).Add(tolerance).UnixMilli()
+	if got < earliest || got > latest {
+		t.Errorf(
+			"ZScore(%q, %q) = %d; want Unix-millisecond expiry between %d and %d",
+			indexKey,
+			hash,
+			got,
+			earliest,
+			latest,
+		)
 	}
 }
 
@@ -419,8 +607,15 @@ func assertZScoreBetween(
 		t.Fatal(err)
 	}
 	got := int64(score)
-	if got < earliest.Unix()-1 || got > latest.Unix()+1 {
-		t.Fatalf("ZScore(%q, %q) = %d; want between %d and %d", key, member, got, earliest.Unix(), latest.Unix())
+	if got < earliest.UnixMilli()-2000 || got > latest.UnixMilli()+2000 {
+		t.Fatalf(
+			"ZScore(%q, %q) = %d; want Unix-millisecond score between %d and %d",
+			key,
+			member,
+			got,
+			earliest.UnixMilli(),
+			latest.UnixMilli(),
+		)
 	}
 }
 

@@ -36,13 +36,12 @@ type DeviceSession struct {
 
 var createWebSessionScript = goredis.NewScript(`
 local redis_time = redis.call('TIME')
-local now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
-local now_seconds = math.floor(now_ms / 1000)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_seconds)
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
 
 local absolute_ms = tonumber(ARGV[7])
-if not absolute_ms or absolute_ms <= now_ms then return 0 end
-local expires_ms = now_ms + tonumber(ARGV[8])
+if not absolute_ms or absolute_ms <= redis_now_ms then return 0 end
+local expires_ms = redis_now_ms + tonumber(ARGV[8])
 if absolute_ms < expires_ms then expires_ms = absolute_ms end
 
 redis.call('HSET', KEYS[1],
@@ -50,92 +49,82 @@ redis.call('HSET', KEYS[1],
   'created_at', ARGV[4], 'last_seen_at', ARGV[5],
   'absolute_expires_at', ARGV[6], 'absolute_expires_at_unix_ms', ARGV[7])
 redis.call('PEXPIREAT', KEYS[1], expires_ms)
-redis.call('ZADD', KEYS[2], math.floor(expires_ms / 1000), ARGV[9])
+redis.call('ZADD', KEYS[2], expires_ms, ARGV[9])
 return 1
 `)
 
 var createDeviceSessionScript = goredis.NewScript(`
 local redis_time = redis.call('TIME')
-local now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
-local now_seconds = math.floor(now_ms / 1000)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', now_seconds)
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
 
 redis.call('HSET', KEYS[1],
   'user_id', ARGV[1], 'device_id', ARGV[2], 'password_version', ARGV[3],
   'created_at', ARGV[4], 'last_seen_at', ARGV[5])
 redis.call('PEXPIRE', KEYS[1], ARGV[6])
-redis.call('ZADD', KEYS[2], math.floor((now_ms + tonumber(ARGV[6])) / 1000), ARGV[7])
+redis.call('ZADD', KEYS[2], redis_now_ms + tonumber(ARGV[6]), ARGV[7])
 return 1
 `)
 
 var resolveWebSessionScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+
 local user_id = redis.call('HGET', KEYS[1], 'user_id')
 if not user_id then return {0} end
 
-local index_key = ARGV[6] .. user_id .. ARGV[7]
-redis.call('ZREMRANGEBYSCORE', index_key, '-inf', ARGV[1])
+local index_key = ARGV[3] .. user_id .. ARGV[4]
+redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
 
 local values = redis.call('HMGET', KEYS[1],
   'csrf_hash', 'password_version', 'created_at', 'absolute_expires_at',
   'absolute_expires_at_unix_ms')
 local absolute_ms = tonumber(values[5])
-local now_ms = tonumber(ARGV[2])
-if not absolute_ms or now_ms >= absolute_ms then
+if not absolute_ms or redis_now_ms >= absolute_ms then
   redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[8])
+  redis.call('ZREM', index_key, ARGV[5])
   return {0}
 end
 
-local current_version = redis.call('HGET', ARGV[6] .. user_id, 'password_version')
+local current_version = redis.call('HGET', ARGV[3] .. user_id, 'password_version')
 if not current_version or current_version ~= values[2] then
   redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[8])
+  redis.call('ZREM', index_key, ARGV[5])
   return {0}
 end
 
-local redis_time = redis.call('TIME')
-local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
-if redis_now_ms >= absolute_ms then
-  redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[8])
-  return {0}
-end
-local expires_ms = now_ms + tonumber(ARGV[4])
+local expires_ms = redis_now_ms + tonumber(ARGV[2])
 if absolute_ms < expires_ms then expires_ms = absolute_ms end
-if expires_ms <= redis_now_ms then
-  redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[8])
-  return {0}
-end
 
-redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[3])
+redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
 redis.call('PEXPIREAT', KEYS[1], expires_ms)
-redis.call('ZADD', index_key, math.floor(expires_ms / 1000), ARGV[8])
-return {1, user_id, values[1], values[2], values[3], ARGV[3], values[4]}
+redis.call('ZADD', index_key, expires_ms, ARGV[5])
+return {1, user_id, values[1], values[2], values[3], ARGV[1], values[4]}
 `)
 
 var resolveDeviceSessionScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+
 local user_id = redis.call('HGET', KEYS[1], 'user_id')
 if not user_id then return {0} end
 
-local index_key = ARGV[4] .. user_id .. ARGV[5]
-redis.call('ZREMRANGEBYSCORE', index_key, '-inf', ARGV[1])
+local index_key = ARGV[3] .. user_id .. ARGV[4]
+redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
 
 local values = redis.call('HMGET', KEYS[1],
   'device_id', 'password_version', 'created_at')
-local current_version = redis.call('HGET', ARGV[4] .. user_id, 'password_version')
+local current_version = redis.call('HGET', ARGV[3] .. user_id, 'password_version')
 if not current_version or current_version ~= values[2] then
   redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[6])
+  redis.call('ZREM', index_key, ARGV[5])
   return {0}
 end
 
-local redis_time = redis.call('TIME')
-local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
-redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[2])
-redis.call('PEXPIRE', KEYS[1], ARGV[3])
-redis.call('ZADD', index_key, math.floor((redis_now_ms + tonumber(ARGV[3])) / 1000), ARGV[6])
-return {1, user_id, values[1], values[2], values[3], ARGV[2]}
+redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ARGV[2])
+redis.call('ZADD', index_key, redis_now_ms + tonumber(ARGV[2]), ARGV[5])
+return {1, user_id, values[1], values[2], values[3], ARGV[1]}
 `)
 
 var revokeSessionScript = goredis.NewScript(`
@@ -151,16 +140,18 @@ return 1
 `)
 
 var revokeAllUserSessionsScript = goredis.NewScript(`
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', ARGV[1])
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', redis_now_ms)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
 
 local web_sessions = redis.call('ZRANGE', KEYS[1], 0, -1)
 for _, hash in ipairs(web_sessions) do
-  redis.call('DEL', ARGV[2] .. hash)
+  redis.call('DEL', ARGV[1] .. hash)
 end
 local device_sessions = redis.call('ZRANGE', KEYS[2], 0, -1)
 for _, hash in ipairs(device_sessions) do
-  redis.call('DEL', ARGV[3] .. hash)
+  redis.call('DEL', ARGV[2] .. hash)
 end
 redis.call('DEL', KEYS[1], KEYS[2])
 return #web_sessions + #device_sessions
@@ -199,11 +190,8 @@ func (s *Store) ResolveWebSession(ctx context.Context, sessionHash string, now t
 		ctx,
 		s.rdb,
 		[]string{webSessionKey(sessionHash)},
-		now.Unix(),
-		now.UnixMilli(),
 		formatRedisTime(now),
 		WebSessionIdleTTL.Milliseconds(),
-		sessionHash,
 		sessionUserKeyPrefix,
 		webSessionIndexSuffix,
 		sessionHash,
@@ -281,7 +269,6 @@ func (s *Store) ResolveDeviceSession(ctx context.Context, sessionHash string, no
 		ctx,
 		s.rdb,
 		[]string{deviceSessionKey(sessionHash)},
-		now.Unix(),
 		formatRedisTime(now),
 		DeviceSessionIdleTTL.Milliseconds(),
 		sessionUserKeyPrefix,
@@ -334,12 +321,10 @@ func (s *Store) RevokeDeviceSession(ctx context.Context, sessionHash string) err
 }
 
 func (s *Store) RevokeAllUserSessions(ctx context.Context, userID string) error {
-	now := time.Now()
 	if err := revokeAllUserSessionsScript.Run(
 		ctx,
 		s.rdb,
 		[]string{userWebSessionsKey(userID), userDeviceSessionsKey(userID)},
-		now.Unix(),
 		"agentlink:v2:web_session:",
 		"agentlink:v2:device_session:",
 	).Err(); err != nil {
