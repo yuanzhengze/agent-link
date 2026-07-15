@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,7 +57,7 @@ func generatePreviewToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-func parsePublicOrigin(raw string) (string, error) {
+func parsePublicOrigin(raw string, cookieSecure bool) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("invalid public URL: %w", err)
@@ -64,14 +65,28 @@ func parsePublicOrigin(raw string) (string, error) {
 	if u.Scheme == "" || u.Host == "" {
 		return "", fmt.Errorf("invalid public URL: missing scheme or host")
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("invalid public URL: unsupported scheme %q", u.Scheme)
+	}
 	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("invalid public URL: path not allowed")
 	}
+
+	hostname := u.Hostname()
+	ip := net.ParseIP(hostname)
+	isLoopback := strings.EqualFold(hostname, "localhost") || ip != nil && ip.IsLoopback()
+	if cookieSecure && u.Scheme != "https" {
+		return "", fmt.Errorf("invalid cookie transport: secure cookies require HTTPS")
+	}
+	if !isLoopback && (u.Scheme != "https" || !cookieSecure) {
+		return "", fmt.Errorf("invalid cookie transport: non-loopback URLs require HTTPS and secure cookies")
+	}
+
 	return u.Scheme + "://" + u.Host, nil
 }
 
 func NewWithOptions(opts ServerOptions) *Server {
-	publicOrigin, err := parsePublicOrigin(opts.PublicURL)
+	publicOrigin, err := parsePublicOrigin(opts.PublicURL, opts.CookieSecure)
 	if err != nil {
 		panic(err)
 	}
@@ -129,8 +144,6 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("POST /api/auth/change-password", s.requireIdentity(http.HandlerFunc(s.handleAuthChangePassword)))
 	s.mux.HandleFunc("POST /api/auth/device-login", s.handleDeviceLogin)
 	s.mux.HandleFunc("POST /api/auth/device-logout", s.handleDeviceLogout)
-	s.mux.Handle("GET /api/auth/test-protected", s.requireIdentity(http.HandlerFunc(s.handleAuthTestProtected)))
-	s.mux.Handle("GET /api/auth/test-actor", s.requireIdentity(http.HandlerFunc(s.handleAuthTestActor)))
 
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken

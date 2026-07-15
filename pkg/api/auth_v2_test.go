@@ -37,6 +37,29 @@ func setupAuthV2TestServer(t *testing.T) {
 		CookieSecure: false,
 		PublicURL:    "http://127.0.0.1:0",
 	})
+	authV2Srv.mux.Handle(
+		"GET /api/auth/test-protected",
+		authV2Srv.requireIdentity(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+		})),
+	)
+	authV2Srv.mux.Handle(
+		"GET /api/auth/test-actor",
+		authV2Srv.requireIdentity(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			actor, ok := ActorFromContext(r.Context())
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{
+				"user_id":     actor.UserID,
+				"username":    actor.Username,
+				"device_id":   actor.DeviceID,
+				"device_name": actor.DeviceName,
+				"client_type": actor.ClientType,
+			})
+		})),
+	)
 	authV2TS = httptest.NewServer(authV2Srv.authMiddleware(authV2Srv.mux))
 	authTestOrigin = authV2TS.URL
 	authV2Srv.publicOrigin = authTestOrigin
@@ -334,8 +357,10 @@ func TestAuthLogoutRevokesCookieSession(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("logout expected 204, got %d", resp.StatusCode)
 	}
-	if c := cookieByName(resp.Cookies(), sessionCookieName); c == nil || c.MaxAge != -1 {
-		t.Fatal("logout should clear session cookie")
+	for _, name := range []string{sessionCookieName, csrfCookieName} {
+		if c := cookieByName(resp.Cookies(), name); c == nil || c.MaxAge != -1 {
+			t.Fatalf("logout should clear %s cookie", name)
+		}
 	}
 
 	meReq, _ := http.NewRequest(http.MethodGet, authV2TS.URL+"/api/auth/me", nil)
@@ -495,6 +520,118 @@ func TestAuthCookieSecureFlag(t *testing.T) {
 	}
 }
 
+func TestNewWithOptionsCookieTransport(t *testing.T) {
+	tests := []struct {
+		name         string
+		publicURL    string
+		cookieSecure bool
+		wantPanic    bool
+	}{
+		{
+			name:      "localhost insecure allowed case insensitive",
+			publicURL: "http://LOCALHOST:8080",
+		},
+		{
+			name:      "IPv4 loopback insecure allowed",
+			publicURL: "http://127.0.0.1:8080",
+		},
+		{
+			name:      "IPv6 loopback insecure allowed",
+			publicURL: "http://[::1]:8080",
+		},
+		{
+			name:         "public HTTPS secure allowed",
+			publicURL:    "https://app.example.com",
+			cookieSecure: true,
+		},
+		{
+			name:      "public HTTP insecure rejected",
+			publicURL: "http://app.example.com",
+			wantPanic: true,
+		},
+		{
+			name:         "public HTTP secure rejected",
+			publicURL:    "http://app.example.com",
+			cookieSecure: true,
+			wantPanic:    true,
+		},
+		{
+			name:      "public HTTPS insecure rejected",
+			publicURL: "https://app.example.com",
+			wantPanic: true,
+		},
+		{
+			name:         "localhost HTTP secure rejected",
+			publicURL:    "http://localhost:8080",
+			cookieSecure: true,
+			wantPanic:    true,
+		},
+		{
+			name:         "unsupported scheme rejected",
+			publicURL:    "ftp://app.example.com",
+			cookieSecure: true,
+			wantPanic:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			panicked := func() (panicked bool) {
+				defer func() {
+					panicked = recover() != nil
+				}()
+				NewWithOptions(ServerOptions{
+					DataDir:      t.TempDir(),
+					CookieSecure: tt.cookieSecure,
+					PublicURL:    tt.publicURL,
+				})
+				return false
+			}()
+			if panicked != tt.wantPanic {
+				t.Fatalf(
+					"NewWithOptions(PublicURL=%q, CookieSecure=%v) panicked=%v; want %v",
+					tt.publicURL,
+					tt.cookieSecure,
+					panicked,
+					tt.wantPanic,
+				)
+			}
+		})
+	}
+}
+
+func TestProductionMuxOmitsAuthTestRoutes(t *testing.T) {
+	srv := NewWithOptions(ServerOptions{
+		DataDir:   t.TempDir(),
+		PublicURL: "http://localhost:8080",
+	})
+	handler := srv.authMiddleware(srv.mux)
+
+	for _, path := range []string{
+		"/api/auth/test-protected",
+		"/api/auth/test-actor",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			resp := httptest.NewRecorder()
+			handler.ServeHTTP(resp, req)
+			if resp.Code != http.StatusNotFound && resp.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("production route %s returned %d; want 404 or 405", path, resp.Code)
+			}
+		})
+	}
+}
+
+func TestAuthTestOnlyProbeRequiresIdentity(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	resp, body := authJSON(t, http.MethodGet, "/api/auth/test-protected", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("test-only protected route expected 401, got %d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestAuthRegisterDuplicateUsername409(t *testing.T) {
 	setupAuthV2TestServer(t)
 	cleanupAuthV2Keys(t)
@@ -538,4 +675,3 @@ func mustReadBody(t *testing.T, resp *http.Response) []byte {
 	resp.Body.Close()
 	return body
 }
-

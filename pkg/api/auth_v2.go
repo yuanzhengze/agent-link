@@ -46,14 +46,6 @@ type deviceLoginResponse struct {
 	DeviceCredential string       `json:"device_credential"`
 }
 
-type testActorResponse struct {
-	UserID     string `json:"user_id"`
-	Username   string `json:"username"`
-	DeviceID   string `json:"device_id"`
-	DeviceName string `json:"device_name"`
-	ClientType string `json:"client_type"`
-}
-
 func toAuthUserView(user auth.User) authUserView {
 	return authUserView{
 		ID:                 user.ID,
@@ -249,25 +241,6 @@ func (s *Server) handleDeviceLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) handleAuthTestProtected(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
-}
-
-func (s *Server) handleAuthTestActor(w http.ResponseWriter, r *http.Request) {
-	actor, ok := ActorFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	writeJSON(w, http.StatusOK, testActorResponse{
-		UserID:     actor.UserID,
-		Username:   actor.Username,
-		DeviceID:   actor.DeviceID,
-		DeviceName: actor.DeviceName,
-		ClientType: actor.ClientType,
-	})
 }
 
 func (s *Server) writeAuthServiceError(w http.ResponseWriter, err error) {

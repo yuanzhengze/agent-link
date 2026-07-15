@@ -197,9 +197,10 @@ func TestPublicURLOriginMismatchOnRegister(t *testing.T) {
 	}
 
 	srv := NewWithOptions(ServerOptions{
-		DataDir:   t.TempDir(),
-		Redis:     rdb,
-		PublicURL: "https://app.example.com",
+		DataDir:      t.TempDir(),
+		Redis:        rdb,
+		CookieSecure: true,
+		PublicURL:    "https://app.example.com",
 	})
 	ts := httptest.NewServer(srv.authMiddleware(srv.mux))
 	defer ts.Close()
