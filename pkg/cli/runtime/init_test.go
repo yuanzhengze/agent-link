@@ -36,13 +36,15 @@ func TestCheckPrereqs(t *testing.T) {
 	})
 
 	t.Run("partial PATH with tmux only", func(t *testing.T) {
-		// Find where tmux is and only expose that directory
-		tmuxPath, err := exec.LookPath("tmux")
+		bin := t.TempDir()
+		realTmux, err := exec.LookPath("tmux")
 		if err != nil {
-			t.Skip("tmux not found in PATH, can't test")
+			t.Skip("tmux unavailable")
 		}
-		tmuxDir := filepath.Dir(tmuxPath)
-		t.Setenv("PATH", tmuxDir)
+		if err := os.Symlink(realTmux, filepath.Join(bin, "tmux")); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", bin)
 		err = l.CheckPrereqs()
 		if err == nil {
 			t.Fatal("expected error when claude is missing")
