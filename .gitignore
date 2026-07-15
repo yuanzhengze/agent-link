@@ -10,3 +10,4 @@ deploy/agentlink
 deploy/server.log
 .env
 *.local
+/.worktrees/
