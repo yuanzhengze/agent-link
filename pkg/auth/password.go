@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -19,19 +20,30 @@ const (
 	argonParallelism = 2
 	argonSaltLength  = 16
 	argonKeyLength   = 32
+
+	minPasswordLength   = 10
+	maxPHCLength        = 512
+	maxArgonMemory      = 256 * 1024
+	maxArgonIterations  = 10
+	maxArgonParallelism = 16
+	maxSaltLength       = 64
+	maxKeyLength        = 64
 )
 
-var usernamePattern = regexp.MustCompile(`^[a-z0-9_-]{3,32}$`)
+var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{3,32}$`)
 
 func NormalizeUsername(username string) (string, error) {
-	normalized := strings.ToLower(username)
-	if !usernamePattern.MatchString(normalized) {
+	if !usernamePattern.MatchString(username) {
 		return "", errors.New("username must be 3-32 ASCII letters, digits, underscores, or hyphens")
 	}
-	return normalized, nil
+	return strings.ToLower(username), nil
 }
 
 func HashPassword(password string) (string, error) {
+	if utf8.RuneCountInString(password) < minPasswordLength {
+		return "", fmt.Errorf("password must be at least %d characters", minPasswordLength)
+	}
+
 	salt := make([]byte, argonSaltLength)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("generate password salt: %w", err)
@@ -63,13 +75,18 @@ func VerifyPassword(encoded, password string) (bool, error) {
 		return false, err
 	}
 
+	hashLength := len(params.hash)
+	if uint64(hashLength) > uint64(^uint32(0)) {
+		return false, errors.New("password hash value is too long")
+	}
+
 	hash := argon2.IDKey(
 		[]byte(password),
 		params.salt,
 		params.iterations,
 		params.memory,
 		params.parallelism,
-		uint32(len(params.hash)),
+		uint32(hashLength),
 	)
 	return subtle.ConstantTimeCompare(hash, params.hash) == 1, nil
 }
@@ -83,6 +100,10 @@ type passwordParams struct {
 }
 
 func parsePasswordPHC(encoded string) (passwordParams, error) {
+	if len(encoded) > maxPHCLength {
+		return passwordParams{}, errors.New("password hash exceeds maximum length")
+	}
+
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[0] != "" {
 		return passwordParams{}, errors.New("invalid password hash format")
@@ -116,6 +137,15 @@ func parsePasswordPHC(encoded string) (passwordParams, error) {
 	if err != nil {
 		return passwordParams{}, fmt.Errorf("invalid argon2 parallelism: %w", err)
 	}
+	if memory > maxArgonMemory {
+		return passwordParams{}, errors.New("argon2 memory exceeds maximum")
+	}
+	if iterations > maxArgonIterations {
+		return passwordParams{}, errors.New("argon2 iterations exceeds maximum")
+	}
+	if parallelism > maxArgonParallelism {
+		return passwordParams{}, errors.New("argon2 parallelism exceeds maximum")
+	}
 	if memory == 0 || iterations == 0 || parallelism == 0 {
 		return passwordParams{}, errors.New("argon2 parameters must be positive")
 	}
@@ -130,6 +160,9 @@ func parsePasswordPHC(encoded string) (passwordParams, error) {
 	if len(salt) == 0 {
 		return passwordParams{}, errors.New("password hash salt is empty")
 	}
+	if len(salt) > maxSaltLength {
+		return passwordParams{}, errors.New("password hash salt exceeds maximum length")
+	}
 
 	hash, err := base64.RawStdEncoding.Strict().DecodeString(parts[5])
 	if err != nil {
@@ -137,6 +170,9 @@ func parsePasswordPHC(encoded string) (passwordParams, error) {
 	}
 	if len(hash) == 0 {
 		return passwordParams{}, errors.New("password hash value is empty")
+	}
+	if len(hash) > maxKeyLength {
+		return passwordParams{}, errors.New("password hash value exceeds maximum length")
 	}
 
 	return passwordParams{
