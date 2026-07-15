@@ -155,13 +155,14 @@ agentlink-admin user reset-password <username>
 | 任命/撤销 Admin | 是 | 否 | 否 |
 | 移除 Admin | 是 | 否 | 否 |
 | 转让 Owner | 是 | 否 | 否 |
-| 删除团队 | 是 | 否 | 否 |
+| 主动退出团队 | 转让后 | 是 | 是 |
 
 约束：
 
 - 每个团队恰好有一个 Owner。
 - Owner 不能直接退出、被移除或降级；必须先转让所有权。
 - Admin 不能修改 Owner 或其他 Admin 的角色。
+- Admin/Member 可主动退出团队；退出后立即失去该团队访问权。
 - 用户被移出团队后，其现有会话仍可用于其他团队，但立即失去该团队权限。
 
 ## 6. 数据模型
@@ -254,6 +255,8 @@ POST /api/auth/device-logout
 
 `register/login` 成功后返回用户与团队摘要。Web 客户端同时获得 HttpOnly session Cookie 和一个非 HttpOnly、非鉴权用途的 `al_csrf` Cookie；GUI 读取后放入 `X-CSRF-Token`。`GET /api/auth/me` 会轮换 CSRF 值并重新设置该 Cookie，因此页面刷新后无需保存 token 到 localStorage。Device login 返回一次 Device Session 原文，之后无法再次读取。
 
+管理员重置后，登录响应包含 `must_change_password=true`。该会话只能调用 `me`、`change-password` 和 `logout`；其他受保护接口返回 403 `password change required`。成功改密会清除标记、递增密码版本并撤销全部旧会话，客户端随后重新登录。
+
 ### 7.2 团队
 
 ```text
@@ -266,6 +269,7 @@ POST   /api/teams/{team_id}/invite/rotate
 PATCH  /api/teams/{team_id}/members/{user_id}
 DELETE /api/teams/{team_id}/members/{user_id}
 POST   /api/teams/{team_id}/transfer-owner
+POST   /api/teams/{team_id}/leave
 ```
 
 ### 7.3 团队业务
@@ -296,6 +300,7 @@ POST   /api/teams/{team_id}/transfer-owner
   - 有效 Web Session；
   - 同源 `Origin`；
   - `X-CSRF-Token` 与 `al_csrf` Cookie 相同，且其 SHA-256 与 Web Session 中的 `csrf_hash` 一致。
+- `register/login` 尚无 session，无法校验 CSRF；若请求带 `Origin`，必须与配置的同源地址完全一致。无 `Origin` 的 CLI 注册请求可继续处理。
 - CLI Device Session 不受 CSRF 约束。
 - 生产模式必须使用 HTTPS；只有 localhost 开发模式允许非 Secure Cookie。
 - 日志不得记录密码、session ID、Device Session、CSRF token 或邀请码。
