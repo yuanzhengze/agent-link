@@ -51,13 +51,21 @@ type DeviceLoginResult struct {
 }
 
 type Service struct {
-	store    *Store
-	clock    Clock
-	dummyPHC string
+	store           *Store
+	clock           Clock
+	dummyPHC        string
+	teamIDGenerator func() (string, error)
+	inviteGenerator func() (string, error)
 }
 
 func NewService(store *Store, clock Clock) *Service {
-	return &Service{store: store, clock: clock, dummyPHC: fixedDummyLoginPHC}
+	return &Service{
+		store:           store,
+		clock:           clock,
+		dummyPHC:        fixedDummyLoginPHC,
+		teamIDGenerator: NewTeamID,
+		inviteGenerator: NewInviteCode,
+	}
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (WebLoginResult, error) {

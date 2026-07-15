@@ -14,6 +14,10 @@ import (
 var (
 	ErrNotFound           = errors.New("not found")
 	ErrUsernameExists     = errors.New("username already exists")
+	ErrTeamExists         = errors.New("team already exists")
+	ErrAlreadyMember      = errors.New("already a team member")
+	ErrInvalidInvite      = errors.New("invalid invite")
+	ErrInvalidRole        = errors.New("invalid role")
 	ErrNotMember          = errors.New("not a team member")
 	ErrForbidden          = errors.New("forbidden")
 	ErrSessionExpired     = errors.New("session expired")
@@ -164,7 +168,7 @@ func (s *Store) CreateTeam(ctx context.Context, team Team, inviteHash string) er
 		return fmt.Errorf("create team: %w", err)
 	}
 	if created == 0 {
-		return fmt.Errorf("team %q already exists", team.ID)
+		return ErrTeamExists
 	}
 	return nil
 }

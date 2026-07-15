@@ -25,6 +25,10 @@ func NewDeviceID() (string, error) {
 	return newIdentifier("dev_")
 }
 
+func NewInviteCode() (string, error) {
+	return NewSecret("inv_", 32)
+}
+
 func NewSecret(prefix string, bytes int) (string, error) {
 	if bytes <= 0 {
 		return "", errors.New("secret byte count must be positive")

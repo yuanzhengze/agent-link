@@ -811,3 +811,189 @@ func secretHash(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
 	return hex.EncodeToString(sum[:])
 }
+
+func TestCreateTeamMakesCreatorOwner(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result, err := svc.CreateTeam(context.Background(), owner.ID, "  Core Team  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Team.Name != "Core Team" {
+		t.Fatalf("Team.Name = %q; want trimmed Core Team", result.Team.Name)
+	}
+	if result.Team.OwnerUserID != owner.ID {
+		t.Fatalf("OwnerUserID = %q; want %q", result.Team.OwnerUserID, owner.ID)
+	}
+	role, err := store.Role(context.Background(), result.Team.ID, owner.ID)
+	if err != nil || role != RoleOwner {
+		t.Fatalf("creator role = %q, %v; want owner", role, err)
+	}
+	if result.InviteCode == "" {
+		t.Fatal("CreateTeam() missing invite code")
+	}
+}
+
+func TestJoinTeamRequiresCurrentInvite(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Join Team")
+	joinTestTeam(t, svc, joiner, result.Team.ID, result.InviteCode)
+
+	_, err := svc.JoinTeam(context.Background(), joiner.ID, result.Team.ID, "inv_invalidcodevalue")
+	if !errors.Is(err, ErrInvalidInvite) {
+		t.Fatalf("JoinTeam() wrong invite error = %v; want ErrInvalidInvite", err)
+	}
+	_, err = svc.JoinTeam(context.Background(), joiner.ID, "tm_nonexistentteam000", result.InviteCode)
+	if !errors.Is(err, ErrInvalidInvite) {
+		t.Fatalf("JoinTeam() wrong team error = %v; want ErrInvalidInvite", err)
+	}
+}
+
+func TestRotateInviteInvalidatesPreviousCode(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Rotate Team")
+	oldInvite := result.InviteCode
+
+	newInvite, err := svc.RotateInvite(context.Background(), teamActor(owner, result.Team.ID, RoleOwner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newInvite == oldInvite {
+		t.Fatal("RotateInvite() returned unchanged code")
+	}
+	joinTestTeam(t, svc, joiner, result.Team.ID, newInvite)
+	_, err = svc.JoinTeam(context.Background(), joiner.ID, result.Team.ID, oldInvite)
+	if !errors.Is(err, ErrInvalidInvite) {
+		t.Fatalf("JoinTeam() with old invite error = %v; want ErrInvalidInvite", err)
+	}
+}
+
+func TestAdminCanRemoveMemberButNotAdminOrOwner(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	otherAdmin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Admin Matrix")
+	joinTestTeam(t, svc, admin, result.Team.ID, result.InviteCode)
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+	joinTestTeam(t, svc, otherAdmin, result.Team.ID, result.InviteCode)
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), admin.ID, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), otherAdmin.ID, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ChangeRole(context.Background(), teamActor(admin, result.Team.ID, RoleAdmin), member.ID, RoleAdmin); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin ChangeRole error = %v; want ErrForbidden", err)
+	}
+	if err := svc.RemoveMember(context.Background(), teamActor(admin, result.Team.ID, RoleAdmin), member.ID); err != nil {
+		t.Fatalf("admin RemoveMember(member) error = %v", err)
+	}
+	if err := svc.RemoveMember(context.Background(), teamActor(admin, result.Team.ID, RoleAdmin), otherAdmin.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin RemoveMember(admin) error = %v; want ErrForbidden", err)
+	}
+	if err := svc.RemoveMember(context.Background(), teamActor(admin, result.Team.ID, RoleAdmin), owner.ID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("admin RemoveMember(owner) error = %v; want ErrForbidden", err)
+	}
+}
+
+func TestOwnerCanPromoteAndDemoteAdmin(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Promote Team")
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), member.ID, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	role, err := store.Role(context.Background(), result.Team.ID, member.ID)
+	if err != nil || role != RoleAdmin {
+		t.Fatalf("promoted role = %q, %v; want admin", role, err)
+	}
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), member.ID, RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	role, err = store.Role(context.Background(), result.Team.ID, member.ID)
+	if err != nil || role != RoleMember {
+		t.Fatalf("demoted role = %q, %v; want member", role, err)
+	}
+}
+
+func TestOwnerMustTransferBeforeLeaving(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, _, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Owner Leave")
+	if err := svc.LeaveTeam(context.Background(), teamActor(owner, result.Team.ID, RoleOwner)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("owner LeaveTeam error = %v; want ErrForbidden", err)
+	}
+}
+
+func TestAdminAndMemberCanLeaveTeam(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, rdb := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Leave Team")
+	joinTestTeam(t, svc, admin, result.Team.ID, result.InviteCode)
+	joinTestTeam(t, svc, member, result.Team.ID, result.InviteCode)
+	if err := svc.ChangeRole(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), admin.ID, RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.LeaveTeam(context.Background(), teamActor(admin, result.Team.ID, RoleAdmin)); err != nil {
+		t.Fatalf("admin LeaveTeam error = %v", err)
+	}
+	if err := svc.LeaveTeam(context.Background(), teamActor(member, result.Team.ID, RoleMember)); err != nil {
+		t.Fatalf("member LeaveTeam error = %v", err)
+	}
+	if _, err := store.Role(context.Background(), result.Team.ID, admin.ID); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("admin role after leave = %v; want ErrNotMember", err)
+	}
+	if _, err := store.Role(context.Background(), result.Team.ID, member.ID); !errors.Is(err, ErrNotMember) {
+		t.Fatalf("member role after leave = %v; want ErrNotMember", err)
+	}
+	assertUserTeamIndex(t, rdb, admin.ID, result.Team.ID, false)
+	assertUserTeamIndex(t, rdb, member.ID, result.Team.ID, false)
+}
+
+func TestTransferOwnerIsAtomic(t *testing.T) {
+	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	svc, store, _ := newAuthService(t, clock)
+	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	successor := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
+	result := createTestTeam(t, svc, owner, "Atomic Transfer")
+	joinTestTeam(t, svc, successor, result.Team.ID, result.InviteCode)
+
+	if err := svc.TransferOwner(context.Background(), teamActor(owner, result.Team.ID, RoleOwner), successor.ID); err != nil {
+		t.Fatal(err)
+	}
+	team, err := store.Team(context.Background(), result.Team.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if team.OwnerUserID != successor.ID {
+		t.Fatalf("OwnerUserID = %q; want %q", team.OwnerUserID, successor.ID)
+	}
+	oldRole, err := store.Role(context.Background(), result.Team.ID, owner.ID)
+	if err != nil || oldRole != RoleAdmin {
+		t.Fatalf("old owner role = %q, %v; want admin", oldRole, err)
+	}
+	newRole, err := store.Role(context.Background(), result.Team.ID, successor.ID)
+	if err != nil || newRole != RoleOwner {
+		t.Fatalf("successor role = %q, %v; want owner", newRole, err)
+	}
+}
