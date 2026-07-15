@@ -103,45 +103,78 @@ return {1, user_id, values[1], values[2], values[3], ARGV[1], values[4]}
 `)
 
 var resolveDeviceSessionScript = goredis.NewScript(`
+local function key_type(key)
+  return redis.call('TYPE', key)['ok']
+end
+
 local redis_time = redis.call('TIME')
 local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
 
-local user_id = redis.call('HGET', KEYS[1], 'user_id')
-if not user_id then return {0} end
+local session_type = key_type(KEYS[1])
+if session_type == 'none' then return {0} end
+if session_type ~= 'hash' then
+  return redis.error_reply('device session has wrong type')
+end
+local values = redis.call('HMGET', KEYS[1],
+  'user_id', 'device_id', 'password_version', 'created_at')
+local user_id = values[1]
+local device_id = values[2]
+if not user_id then
+  redis.call('DEL', KEYS[1])
+  return {0}
+end
 
 local index_key = ARGV[3] .. user_id .. ARGV[4]
-redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
+local index_type = key_type(index_key)
+if index_type ~= 'none' and index_type ~= 'zset' then
+  return redis.error_reply('device session index has wrong type')
+end
 
-local values = redis.call('HMGET', KEYS[1],
-  'device_id', 'password_version', 'created_at')
-local device_id = values[1]
-if not device_id then
+local function expire_session()
   redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[5])
+  if index_type == 'zset' then redis.call('ZREM', index_key, ARGV[5]) end
   return {0}
+end
+
+if not device_id then return expire_session() end
+
+local binding_type = key_type(KEYS[2])
+if binding_type ~= 'hash' then return expire_session() end
+local binding = redis.call('HMGET', KEYS[2], 'user_id', 'device_id')
+if not binding[1] or binding[1] ~= user_id or
+   not binding[2] or binding[2] ~= device_id then
+  return expire_session()
 end
 
 local device_key = ARGV[6] .. device_id
-local device_user = redis.call('HGET', device_key, 'user_id')
-local device_session_hash = redis.call('HGET', device_key, 'session_hash')
-if not device_user or device_user ~= user_id or device_session_hash ~= ARGV[5] then
-  redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[5])
-  return {0}
+local device_type = key_type(device_key)
+if device_type ~= 'hash' then return expire_session() end
+local device_values = redis.call('HMGET', device_key, 'user_id', 'session_hash')
+if not device_values[1] or device_values[1] ~= user_id or
+   not device_values[2] or device_values[2] ~= ARGV[5] then
+  return expire_session()
 end
 
-local current_version = redis.call('HGET', ARGV[3] .. user_id, 'password_version')
-if not current_version or current_version ~= values[2] then
-  redis.call('DEL', KEYS[1])
-  redis.call('ZREM', index_key, ARGV[5])
-  return {0}
+local user_key = ARGV[3] .. user_id
+if key_type(user_key) ~= 'hash' then return expire_session() end
+local current_version = redis.call('HGET', user_key, 'password_version')
+if not current_version or current_version ~= values[3] then
+  return expire_session()
 end
 
+local ttl_ms = tonumber(ARGV[2])
+if not ttl_ms or ttl_ms <= 0 then
+  return redis.error_reply('invalid device session TTL')
+end
+
+if index_type == 'zset' then
+  redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
+end
 redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
 redis.call('HSET', device_key, 'last_seen_at', ARGV[1])
-redis.call('PEXPIRE', KEYS[1], ARGV[2])
-redis.call('ZADD', index_key, redis_now_ms + tonumber(ARGV[2]), ARGV[5])
-return {1, user_id, device_id, values[2], values[3], ARGV[1]}
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+redis.call('ZADD', index_key, redis_now_ms + ttl_ms, ARGV[5])
+return {1, user_id, device_id, values[3], values[4], ARGV[1]}
 `)
 
 var revokeSessionScript = goredis.NewScript(`
@@ -285,7 +318,10 @@ func (s *Store) ResolveDeviceSession(ctx context.Context, sessionHash string, no
 	result, err := resolveDeviceSessionScript.Run(
 		ctx,
 		s.rdb,
-		[]string{deviceSessionKey(sessionHash)},
+		[]string{
+			deviceSessionKey(sessionHash),
+			deviceCredentialKey(sessionHash),
+		},
 		formatRedisTime(now),
 		DeviceSessionIdleTTL.Milliseconds(),
 		sessionUserKeyPrefix,

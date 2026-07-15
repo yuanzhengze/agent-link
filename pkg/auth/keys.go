@@ -19,6 +19,9 @@ func userDeviceSessionsKey(id string) string {
 }
 func deviceKey(id string) string          { return "agentlink:v2:device:" + id }
 func userDevicesKey(userID string) string { return userKey(userID) + ":devices" }
+func deviceCredentialKey(sessionHash string) string {
+	return "agentlink:v2:device_credential:" + sessionHash
+}
 func loginFailUserKey(normalized string) string {
 	return "agentlink:v2:login_fail:user:" + sha256Hex(normalized)
 }

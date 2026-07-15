@@ -15,10 +15,23 @@ const (
 )
 
 var recordLoginFailureScript = goredis.NewScript(`
-local t1 = redis.call('TYPE', KEYS[1])['ok']
-local t2 = redis.call('TYPE', KEYS[2])['ok']
-if t1 ~= 'none' and t1 ~= 'string' then return {-1, -1} end
-if t2 ~= 'none' and t2 ~= 'string' then return {-1, -1} end
+local function validate_counter(key)
+  local counter_type = redis.call('TYPE', key)['ok']
+  if counter_type == 'none' then return true end
+  if counter_type ~= 'string' then return false end
+  local value = redis.call('GET', key)
+  if not value or not string.match(value, '^%d+$') then return false end
+  local number = tonumber(value)
+  if not number or number < 0 or number ~= math.floor(number) or
+     number > 9007199254740991 then
+    return false
+  end
+  return true
+end
+
+if not validate_counter(KEYS[1]) or not validate_counter(KEYS[2]) then
+  return redis.error_reply('login failure counter is not a non-negative integer')
+end
 
 local user_count = redis.call('INCR', KEYS[1])
 if user_count == 1 then

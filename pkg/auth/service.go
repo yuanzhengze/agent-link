@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 const dummyLoginPassword = "timing-safe-dummy-password"
+
+var fixedDummyLoginPHC = buildFixedDummyLoginPHC()
 
 type Clock interface {
 	Now() time.Time
@@ -48,15 +51,13 @@ type DeviceLoginResult struct {
 }
 
 type Service struct {
-	store     *Store
-	clock     Clock
-	dummyPHC  string
-	dummyOnce sync.Once
-	dummyErr  error
+	store    *Store
+	clock    Clock
+	dummyPHC string
 }
 
 func NewService(store *Store, clock Clock) *Service {
-	return &Service{store: store, clock: clock}
+	return &Service{store: store, clock: clock, dummyPHC: fixedDummyLoginPHC}
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (WebLoginResult, error) {
@@ -191,7 +192,6 @@ func (s *Service) ChangePassword(ctx context.Context, userID, currentPassword, n
 		ctx,
 		userID,
 		passwordPHC,
-		user.PasswordVersion+1,
 		false,
 	)
 }
@@ -213,7 +213,6 @@ func (s *Service) ResetPassword(ctx context.Context, username string) (string, e
 		ctx,
 		user.ID,
 		passwordPHC,
-		user.PasswordVersion+1,
 		true,
 	); err != nil {
 		return "", err
@@ -263,22 +262,22 @@ func (s *Service) authenticateLogin(ctx context.Context, username, password, ip 
 	}
 
 	user, err := s.store.UserByUsername(ctx, username)
-	if errors.Is(err, ErrNotFound) {
-		if err := s.verifyDummyPassword(password); err != nil {
+	unknown := errors.Is(err, ErrNotFound)
+	if err != nil {
+		if !unknown {
 			return User{}, err
 		}
-		return User{}, s.recordLoginFailure(ctx, normalized, trimmedIP)
 	}
+
+	passwordPHC := user.PasswordPHC
+	if unknown {
+		passwordPHC = s.dummyPHC
+	}
+	passwordMatches, err := VerifyPassword(passwordPHC, password)
 	if err != nil {
 		return User{}, err
 	}
-	if user.Status != "active" {
-		if err := s.verifyUserPassword(user, password); err != nil {
-			return User{}, err
-		}
-		return User{}, s.recordLoginFailure(ctx, normalized, trimmedIP)
-	}
-	if err := s.verifyUserPassword(user, password); err != nil {
+	if unknown || user.Status != "active" || !passwordMatches {
 		return User{}, s.recordLoginFailure(ctx, normalized, trimmedIP)
 	}
 	if err := s.store.ClearLoginRateLimit(ctx, normalized, trimmedIP); err != nil {
@@ -320,31 +319,31 @@ func (s *Service) verifyUserPassword(user User, password string) error {
 	return nil
 }
 
-func (s *Service) verifyDummyPassword(password string) error {
-	if err := s.initDummyPHC(); err != nil {
-		return err
-	}
-	ok, err := VerifyPassword(s.dummyPHC, password)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrInvalidCredentials
-	}
-	return nil
-}
-
-func (s *Service) initDummyPHC() error {
-	s.dummyOnce.Do(func() {
-		s.dummyPHC, s.dummyErr = HashPassword(dummyLoginPassword)
-	})
-	return s.dummyErr
-}
-
 func generateResetPassword() (string, error) {
 	value := make([]byte, 15)
 	if _, err := rand.Read(value); err != nil {
 		return "", fmt.Errorf("generate reset password: %w", err)
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func buildFixedDummyLoginPHC() string {
+	salt := []byte("agentlink-dummy!")
+	hash := argon2.IDKey(
+		[]byte(dummyLoginPassword),
+		salt,
+		argonIterations,
+		argonMemory,
+		argonParallelism,
+		argonKeyLength,
+	)
+	return fmt.Sprintf(
+		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		argonMemory,
+		argonIterations,
+		argonParallelism,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(hash),
+	)
 }
