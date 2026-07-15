@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -269,6 +270,69 @@ func TestAuthMeRotatesCSRF(t *testing.T) {
 	}
 }
 
+func TestAuthMeRotationInvalidatesPreviousCSRF(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	username := "rotatecsrf" + strings.Repeat("s", 3)
+	regResp, _ := registerAuthUser(t, username, "correct horse battery staple")
+	session := cookieByName(regResp.Cookies(), sessionCookieName)
+	oldCSRF := cookieByName(regResp.Cookies(), csrfCookieName)
+	if session == nil || oldCSRF == nil {
+		t.Fatal("register response missing auth cookies")
+	}
+
+	meReq, _ := http.NewRequest(http.MethodGet, authV2TS.URL+"/api/auth/me", nil)
+	meReq.Header.Set("Cookie", withCookies(regResp))
+	meResp, err := http.DefaultClient.Do(meReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meBody, _ := io.ReadAll(meResp.Body)
+	meResp.Body.Close()
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("me expected 200, got %d body=%s", meResp.StatusCode, meBody)
+	}
+	newCSRF := cookieByName(meResp.Cookies(), csrfCookieName)
+	if newCSRF == nil || newCSRF.Value == "" || newCSRF.Value == oldCSRF.Value {
+		t.Fatal("me should return a distinct csrf cookie")
+	}
+
+	oldReq, _ := http.NewRequest(http.MethodPost, authV2TS.URL+"/api/auth/logout", nil)
+	oldReq.Header.Set(
+		"Cookie",
+		sessionCookieName+"="+session.Value+"; "+csrfCookieName+"="+oldCSRF.Value,
+	)
+	oldReq.Header.Set("Origin", authTestOrigin)
+	oldReq.Header.Set("X-CSRF-Token", oldCSRF.Value)
+	oldResp, err := http.DefaultClient.Do(oldReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldBody, _ := io.ReadAll(oldResp.Body)
+	oldResp.Body.Close()
+	if oldResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("old csrf expected 403, got %d body=%s", oldResp.StatusCode, oldBody)
+	}
+
+	newReq, _ := http.NewRequest(http.MethodPost, authV2TS.URL+"/api/auth/logout", nil)
+	newReq.Header.Set(
+		"Cookie",
+		sessionCookieName+"="+session.Value+"; "+csrfCookieName+"="+newCSRF.Value,
+	)
+	newReq.Header.Set("Origin", authTestOrigin)
+	newReq.Header.Set("X-CSRF-Token", newCSRF.Value)
+	newResp, err := http.DefaultClient.Do(newReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBody, _ := io.ReadAll(newResp.Body)
+	newResp.Body.Close()
+	if newResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("rotated csrf expected 204, got %d body=%s", newResp.StatusCode, newBody)
+	}
+}
+
 func TestAuthCookieWriteRejectsMissingCSRF(t *testing.T) {
 	setupAuthV2TestServer(t)
 	cleanupAuthV2Keys(t)
@@ -433,21 +497,33 @@ func TestAuthMustChangePasswordSessionIsRestricted(t *testing.T) {
 	username := "mustchuser" + strings.Repeat("i", 3)
 	registerAuthUser(t, username, "correct horse battery staple")
 
-	store := auth.NewStore(authV2Rdb)
-	user, err := store.UserByUsername(context.Background(), username)
-	if err != nil {
-		t.Fatal(err)
-	}
 	tempPassword, err := authV2Srv.authService.ResetPassword(context.Background(), username)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = user
 
-	loginResp, _ := loginAuthUser(t, username, tempPassword, nil)
-	if loginResp.StatusCode != http.StatusOK {
-		t.Fatalf("login with temp password expected 200, got %d", loginResp.StatusCode)
+	assertMustChange := func(label string, body []byte) map[string]any {
+		t.Helper()
+		var result map[string]any
+		if err := json.Unmarshal(body, &result); err != nil {
+			t.Fatalf("%s response decode: %v", label, err)
+		}
+		user, ok := result["user"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s response missing user: %s", label, body)
+		}
+		mustChange, ok := user["must_change_password"].(bool)
+		if !ok || !mustChange {
+			t.Fatalf("%s user.must_change_password = %v; want true", label, user["must_change_password"])
+		}
+		return result
 	}
+
+	loginResp, loginBody := loginAuthUser(t, username, tempPassword, nil)
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("login with temp password expected 200, got %d body=%s", loginResp.StatusCode, loginBody)
+	}
+	assertMustChange("login", loginBody)
 
 	// Protected probe route registered only in tests via middleware test helper.
 	resp, body := authJSON(t, http.MethodGet, "/api/auth/test-protected", nil, map[string]string{
@@ -467,6 +543,80 @@ func TestAuthMustChangePasswordSessionIsRestricted(t *testing.T) {
 	})
 	if meResp.StatusCode != http.StatusOK {
 		t.Fatalf("me should be allowed, got %d", meResp.StatusCode)
+	}
+
+	deviceResp, deviceBody := authJSON(t, http.MethodPost, "/api/auth/device-login", map[string]string{
+		"username":    username,
+		"password":    tempPassword,
+		"device_name": "must-change-device",
+	}, nil)
+	if deviceResp.StatusCode != http.StatusOK {
+		t.Fatalf("device-login with temp password expected 200, got %d body=%s", deviceResp.StatusCode, deviceBody)
+	}
+	deviceResult := assertMustChange("device-login", deviceBody)
+	credential, ok := deviceResult["device_credential"].(string)
+	if !ok || credential == "" {
+		t.Fatalf("device-login response missing credential: %s", deviceBody)
+	}
+	deviceID, ok := deviceResult["device_id"].(string)
+	if !ok || deviceID == "" {
+		t.Fatalf("device-login response missing device_id: %s", deviceBody)
+	}
+	deviceHeader := map[string]string{"Authorization": "Device " + credential}
+
+	deviceProtectedResp, deviceProtectedBody := authJSON(
+		t,
+		http.MethodGet,
+		"/api/auth/test-protected",
+		nil,
+		deviceHeader,
+	)
+	if deviceProtectedResp.StatusCode != http.StatusForbidden {
+		t.Fatalf(
+			"must-change device protected route expected 403, got %d body=%s",
+			deviceProtectedResp.StatusCode,
+			deviceProtectedBody,
+		)
+	}
+	var deviceErr map[string]string
+	if err := json.Unmarshal(deviceProtectedBody, &deviceErr); err != nil {
+		t.Fatal(err)
+	}
+	if deviceErr["error"] != "password change required" {
+		t.Fatalf("device protected error = %q; want password change required", deviceErr["error"])
+	}
+
+	deviceMeResp, deviceMeBody := authJSON(t, http.MethodGet, "/api/auth/me", nil, deviceHeader)
+	if deviceMeResp.StatusCode != http.StatusOK {
+		t.Fatalf("must-change device me expected 200, got %d body=%s", deviceMeResp.StatusCode, deviceMeBody)
+	}
+
+	deviceLogoutResp, deviceLogoutBody := authJSON(
+		t,
+		http.MethodPost,
+		"/api/auth/device-logout",
+		nil,
+		deviceHeader,
+	)
+	if deviceLogoutResp.StatusCode != http.StatusNoContent {
+		t.Fatalf(
+			"must-change device logout expected 204, got %d body=%s",
+			deviceLogoutResp.StatusCode,
+			deviceLogoutBody,
+		)
+	}
+
+	store := auth.NewStore(authV2Rdb)
+	if _, err := store.Device(context.Background(), deviceID); !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("Device() after must-change logout error = %v; want ErrNotFound", err)
+	}
+	revokedMeResp, revokedMeBody := authJSON(t, http.MethodGet, "/api/auth/me", nil, deviceHeader)
+	if revokedMeResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf(
+			"logged-out must-change device me expected 401, got %d body=%s",
+			revokedMeResp.StatusCode,
+			revokedMeBody,
+		)
 	}
 }
 
@@ -664,14 +814,4 @@ func authJSONOn(ts *httptest.Server, method, path string, body any, headers map[
 	respBody, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	return resp, respBody
-}
-
-func mustReadBody(t *testing.T, resp *http.Response) []byte {
-	t.Helper()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	return body
 }
