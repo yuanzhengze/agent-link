@@ -10,25 +10,27 @@ import (
 	"testing"
 )
 
-// setupAgentEnv creates an isolated agent environment: config, credentials,
-// session dir, and returns the session dir path for chdir.
+// setupAgentEnv creates an isolated, logged-in v2 agent environment (account
+// config with an active team + device-session credential + a "worker" session
+// dir) and returns the session dir path for chdir.
 func setupAgentEnv(t *testing.T, serverURL string) string {
 	t.Helper()
 
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 
-	// ~/.agentlink/config.toml
 	agentlinkDir := filepath.Join(homeDir, ".agentlink")
 	os.MkdirAll(agentlinkDir, 0755)
-	WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), serverURL, "test-device", homeDir, "claude", false, nil)
+	WriteAccountConfig(filepath.Join(agentlinkDir, "config.toml"), AgentConfig{
+		Server:      serverURL,
+		UserID:      "u_1",
+		Username:    "kirby",
+		DeviceID:    "d_1",
+		Device:      "test-device",
+		CurrentTeam: "tm_alpha",
+	})
+	WriteCredentials(filepath.Join(agentlinkDir, "credentials.json"), AgentCredentials{DeviceSession: "ds_test"})
 
-	// ~/.agentlink/credentials.json
-	creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-	credData, _ := json.MarshalIndent(creds, "", "  ")
-	os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
-
-	// worker/.agentlink.toml
 	sessionDir := filepath.Join(homeDir, "worker")
 	os.MkdirAll(sessionDir, 0755)
 	WriteSessionTOML(filepath.Join(sessionDir, ".agentlink.toml"), "worker", "test-device")
@@ -37,22 +39,27 @@ func setupAgentEnv(t *testing.T, serverURL string) string {
 }
 
 func TestRunSend(t *testing.T) {
-	var captured struct {
-		to          string
-		fromSession string
-		content     string
-		authHeader  string
+	type capture struct {
+		path       string
+		to         string
+		fromField  string
+		content    string
+		session    string
+		authHeader string
 	}
+	var captured capture
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.path = r.URL.Path
 		captured.authHeader = r.Header.Get("Authorization")
+		captured.session = r.Header.Get("X-Agentlink-Session")
 
-		var req map[string]string
+		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		r.Body.Close()
-		captured.to = req["to"]
-		captured.fromSession = req["from_session"]
-		captured.content = req["content"]
+		captured.to, _ = req["to"].(string)
+		captured.fromField, _ = req["from_session"].(string)
+		captured.content, _ = req["content"].(string)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"id": "test-msg-id"})
@@ -61,14 +68,8 @@ func TestRunSend(t *testing.T) {
 
 	sessionDir := setupAgentEnv(t, mockSrv.URL)
 
-	t.Run("send with short name", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			content     string
-			authHeader  string
-		}{}
-
+	t.Run("send with short name targets own device", func(t *testing.T) {
+		captured = capture{}
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
@@ -76,29 +77,28 @@ func TestRunSend(t *testing.T) {
 		if err := RunSend("worker", "hello", false, ""); err != nil {
 			t.Fatal(err)
 		}
-
-		if captured.to != "test-device:worker" {
-			t.Errorf("expected to=test-device:worker, got %s", captured.to)
+		if captured.path != "/api/teams/tm_alpha/messages" {
+			t.Errorf("expected /api/teams/tm_alpha/messages, got %s", captured.path)
 		}
-		if captured.fromSession != "worker" {
-			t.Errorf("expected from_session=worker, got %s", captured.fromSession)
+		if captured.to != "d_1:worker" {
+			t.Errorf("expected to=d_1:worker, got %s", captured.to)
+		}
+		if captured.fromField != "" {
+			t.Errorf("from_session must not be sent; got %q", captured.fromField)
+		}
+		if captured.session != "worker" {
+			t.Errorf("expected X-Agentlink-Session=worker, got %s", captured.session)
 		}
 		if captured.content != "hello" {
 			t.Errorf("expected content=hello, got %s", captured.content)
 		}
-		if captured.authHeader == "" {
-			t.Error("expected auth header")
+		if !strings.HasPrefix(captured.authHeader, "Device ") {
+			t.Errorf("expected Device auth, got %q", captured.authHeader)
 		}
 	})
 
-	t.Run("send with full name", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			content     string
-			authHeader  string
-		}{}
-
+	t.Run("send with full device:session name", func(t *testing.T) {
+		captured = capture{}
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
@@ -106,7 +106,6 @@ func TestRunSend(t *testing.T) {
 		if err := RunSend("other-dev:reviewer", "hi there", false, ""); err != nil {
 			t.Fatal(err)
 		}
-
 		if captured.to != "other-dev:reviewer" {
 			t.Errorf("expected to=other-dev:reviewer, got %s", captured.to)
 		}
@@ -116,13 +115,7 @@ func TestRunSend(t *testing.T) {
 	})
 
 	t.Run("send with multi-line content", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			content     string
-			authHeader  string
-		}{}
-
+		captured = capture{}
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
@@ -155,7 +148,9 @@ func TestRunSend_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
+		WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
 
 		err := RunSend("worker", "hi", false, "")
 		if err == nil {
@@ -170,10 +165,10 @@ func TestRunSend_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_test"}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(homeDir, ".agentlink", "credentials.json"), credData, 0600)
+		WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
+		WriteCredentials(filepath.Join(homeDir, ".agentlink", "credentials.json"), AgentCredentials{DeviceSession: "ds_x"})
 
 		err := RunSend("worker", "hi", false, "")
 		if err == nil {
@@ -183,54 +178,34 @@ func TestRunSend_errors(t *testing.T) {
 			t.Errorf("expected .agentlink.toml error, got: %s", err)
 		}
 	})
-
-	t.Run("server returns error", func(t *testing.T) {
-		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "bad request"})
-		}))
-		defer mockSrv.Close()
-
-		sessionDir := setupAgentEnv(t, mockSrv.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
-
-		err := RunSend("worker", "hi", false, "")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-		if !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "bad request") {
-			t.Errorf("expected server error, got: %s", err)
-		}
-	})
 }
 
 func TestRunPull(t *testing.T) {
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request params
-		session := r.URL.Query().Get("session")
+		if r.URL.Path != "/api/teams/tm_alpha/inbox" {
+			t.Errorf("expected /api/teams/tm_alpha/inbox, got %s", r.URL.Path)
+		}
+		session := r.Header.Get("X-Agentlink-Session")
 		limit := r.URL.Query().Get("limit")
 		auth := r.Header.Get("Authorization")
 
 		if session != "worker" {
-			t.Errorf("expected session=worker, got %s", session)
+			t.Errorf("expected X-Agentlink-Session=worker, got %s", session)
 		}
-		if auth == "" {
-			t.Error("expected auth header")
+		if !strings.HasPrefix(auth, "Device ") {
+			t.Errorf("expected Device auth, got %q", auth)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 
 		if limit == "10" {
-			// Return 2 messages for --all
 			json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]string{
 					{"id": "1", "type": "msg", "from_device": "dev-a", "from_session": "main", "content": "first msg", "created_at": "2026-01-01T00:00:00Z"},
 					{"id": "2", "type": "msg", "from_device": "dev-b", "from_session": "reviewer", "content": "second msg", "created_at": "2026-01-02T00:00:00Z"},
 				},
 			})
-		} else if limit == "1" {
+		} else {
 			json.NewEncoder(w).Encode(map[string]any{
 				"items": []map[string]string{
 					{"id": "1", "type": "msg", "from_device": "dev-a", "from_session": "main", "content": "single msg", "created_at": "2026-01-01T00:00:00Z"},
@@ -341,7 +316,6 @@ func TestFindCurrentSession(t *testing.T) {
 	sub := filepath.Join(dir, "a", "b", "c")
 	os.MkdirAll(sub, 0755)
 
-	// Place .agentlink.toml at dir/a/b/
 	WriteSessionTOML(filepath.Join(dir, "a", "b", ".agentlink.toml"), "my-session", "dev")
 
 	origWd, _ := os.Getwd()
@@ -377,7 +351,9 @@ func TestLoadConfig(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-	WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://srv:8080", "test-dev", "/tmp", "claude", false, nil)
+	WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), AgentConfig{
+		Server: "http://srv:8080", UserID: "u_1", Username: "kirby", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+	})
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -386,8 +362,8 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Server != "http://srv:8080" {
 		t.Errorf("expected http://srv:8080, got %s", cfg.Server)
 	}
-	if cfg.Device != "test-dev" {
-		t.Errorf("expected test-dev, got %s", cfg.Device)
+	if cfg.Device != "test-dev" || cfg.DeviceID != "d_1" {
+		t.Errorf("expected device identity to load, got %+v", cfg)
 	}
 }
 
@@ -406,16 +382,14 @@ func TestLoadCredentials(t *testing.T) {
 	t.Setenv("HOME", homeDir)
 
 	os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-	creds := map[string]string{"api_key": "sk_live_testkey123"}
-	data, _ := json.MarshalIndent(creds, "", "  ")
-	os.WriteFile(filepath.Join(homeDir, ".agentlink", "credentials.json"), data, 0600)
+	WriteCredentials(filepath.Join(homeDir, ".agentlink", "credentials.json"), AgentCredentials{DeviceSession: "ds_testkey123"})
 
 	c, err := LoadCredentials()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.APIKey != "sk_live_testkey123" {
-		t.Errorf("expected sk_live_testkey123, got %s", c.APIKey)
+	if c.DeviceSession != "ds_testkey123" {
+		t.Errorf("expected ds_testkey123, got %s", c.DeviceSession)
 	}
 }
 

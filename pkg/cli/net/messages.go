@@ -7,19 +7,28 @@ import (
 )
 
 type recipientStatusJSON struct {
-	Device  string `json:"device"`
-	Session string `json:"session"`
-	Current string `json:"current"`
+	DeviceID string `json:"device_id"`
+	Session  string `json:"session"`
+	Current  string `json:"current"`
 }
 
 func displayRecipientStatus(status *recipientStatusJSON) {
 	if status == nil {
 		return
 	}
-	if status.Device == "" && status.Session == "" {
+	if status.DeviceID == "" && status.Session == "" {
 		return
 	}
-	fmt.Printf("\n%s %s session 当前状态: %s\n", status.Device, status.Session, status.Current)
+	fmt.Printf("\n%s %s session 当前状态: %s\n", status.DeviceID, status.Session, status.Current)
+}
+
+// resolveTarget normalizes a target to "device:session". A bare session name is
+// interpreted as another session on the caller's own device.
+func resolveTarget(cfg *AgentConfig, target string) string {
+	if strings.Contains(target, ":") {
+		return target
+	}
+	return cfg.DeviceID + ":" + target
 }
 
 func RunSend(target, content string, interrupt bool, title string) error {
@@ -33,16 +42,15 @@ func RunSend(target, content string, interrupt bool, title string) error {
 		return err
 	}
 
-	if !strings.Contains(target, ":") {
-		target = cfg.Device + ":" + target
+	path, err := TeamPath(cfg, "/messages")
+	if err != nil {
+		return err
 	}
-
-	resp, err := APIDo(cfg, creds, "POST", "/messages/send", map[string]any{
-		"to":           target,
-		"from_session": session,
-		"interrupt":    interrupt,
-		"title":        title,
-		"content":      content,
+	resp, err := APIDoWithSession(cfg, creds, session, "POST", path, map[string]any{
+		"to":        resolveTarget(cfg, target),
+		"interrupt": interrupt,
+		"title":     title,
+		"content":   content,
 	})
 	if err != nil {
 		return err
@@ -77,8 +85,12 @@ func RunPull(all bool) error {
 		limit = 10
 	}
 
-	path := fmt.Sprintf("/inbox/pull?session=%s&limit=%d", session, limit)
-	resp, err := APIDo(cfg, creds, "GET", path, nil)
+	suffix := fmt.Sprintf("/inbox?limit=%d", limit)
+	path, err := TeamPath(cfg, suffix)
+	if err != nil {
+		return err
+	}
+	resp, err := APIDoWithSession(cfg, creds, session, "GET", path, nil)
 	if err != nil {
 		return err
 	}

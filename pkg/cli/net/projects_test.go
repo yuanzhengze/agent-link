@@ -10,7 +10,7 @@ import (
 )
 
 func TestNetProjectCreate(t *testing.T) {
-	var capturedMethod, capturedPath string
+	var capturedMethod, capturedPath, capturedAuth string
 	var capturedBody struct {
 		Name string `json:"name"`
 	}
@@ -18,6 +18,7 @@ func TestNetProjectCreate(t *testing.T) {
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
+		capturedAuth = r.Header.Get("Authorization")
 		json.NewDecoder(r.Body).Decode(&capturedBody)
 		r.Body.Close()
 
@@ -41,8 +42,11 @@ func TestNetProjectCreate(t *testing.T) {
 	if capturedMethod != "POST" {
 		t.Errorf("expected POST, got %s", capturedMethod)
 	}
-	if capturedPath != "/projects" {
-		t.Errorf("expected /projects, got %s", capturedPath)
+	if capturedPath != "/api/teams/tm_alpha/projects" {
+		t.Errorf("expected /api/teams/tm_alpha/projects, got %s", capturedPath)
+	}
+	if !strings.HasPrefix(capturedAuth, "Device ") {
+		t.Errorf("expected Device auth, got %q", capturedAuth)
 	}
 	if capturedBody.Name != "demo" {
 		t.Errorf("expected name=demo, got %q", capturedBody.Name)
@@ -98,8 +102,8 @@ func TestNetProjectList(t *testing.T) {
 	if capturedMethod != "GET" {
 		t.Errorf("expected GET, got %s", capturedMethod)
 	}
-	if capturedPath != "/projects" {
-		t.Errorf("expected /projects, got %s", capturedPath)
+	if capturedPath != "/api/teams/tm_alpha/projects" {
+		t.Errorf("expected /api/teams/tm_alpha/projects, got %s", capturedPath)
 	}
 }
 

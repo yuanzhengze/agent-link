@@ -10,21 +10,25 @@ import (
 )
 
 func TestNetLockAcquire(t *testing.T) {
-	var capturedMethod, capturedPath string
+	var capturedMethod, capturedPath, capturedSession, capturedAuth string
 	var capturedBody struct {
-		Project string `json:"project"`
-		Session string `json:"session"`
-		Path    string `json:"path"`
+		ProjectID string `json:"project_id"`
+		Session   string `json:"session"`
+		Path      string `json:"path"`
 	}
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
+		capturedSession = r.Header.Get("X-Agentlink-Session")
+		capturedAuth = r.Header.Get("Authorization")
 		json.NewDecoder(r.Body).Decode(&capturedBody)
 		r.Body.Close()
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"owner": "test-device:worker"})
+		json.NewEncoder(w).Encode(map[string]any{
+			"owner": map[string]string{"label": "kirby / test-device / worker"},
+		})
 	}))
 	defer mockSrv.Close()
 
@@ -39,27 +43,34 @@ func TestNetLockAcquire(t *testing.T) {
 	if capturedMethod != "POST" {
 		t.Errorf("expected POST, got %s", capturedMethod)
 	}
-	if capturedPath != "/locks/acquire" {
-		t.Errorf("expected /locks/acquire, got %s", capturedPath)
+	if capturedPath != "/api/teams/tm_alpha/locks/acquire" {
+		t.Errorf("expected /api/teams/tm_alpha/locks/acquire, got %s", capturedPath)
 	}
-	if capturedBody.Project != "proj123" {
-		t.Errorf("expected project=proj123, got %q", capturedBody.Project)
+	if !strings.HasPrefix(capturedAuth, "Device ") {
+		t.Errorf("expected Device auth, got %q", capturedAuth)
+	}
+	if capturedBody.ProjectID != "proj123" {
+		t.Errorf("expected project_id=proj123, got %q", capturedBody.ProjectID)
 	}
 	if capturedBody.Path != "index.html" {
 		t.Errorf("expected path=index.html, got %q", capturedBody.Path)
 	}
-	// setupTaskEnv writes .agentlink.toml with session = "worker".
-	if capturedBody.Session != "worker" {
-		t.Errorf("expected session=worker, got %q", capturedBody.Session)
+	if capturedBody.Session != "" {
+		t.Errorf("session must not be in the body; got %q", capturedBody.Session)
+	}
+	// setupTaskEnv writes .agentlink.toml with session = "worker"; the caller's
+	// session travels in the header, and the server derives ownership from it.
+	if capturedSession != "worker" {
+		t.Errorf("expected X-Agentlink-Session=worker, got %q", capturedSession)
 	}
 }
 
 func TestNetLockAcquire_conflict(t *testing.T) {
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{
 			"error": "file is locked by another session",
-			"owner": "dev:other",
+			"owner": map[string]string{"label": "someone / other"},
 		})
 	}))
 	defer mockSrv.Close()
@@ -84,13 +95,15 @@ func TestNetLockAcquire_noSession(t *testing.T) {
 	}))
 	defer mockSrv.Close()
 
-	// setupTaskEnv sets up a session dir; use a plain tempdir with no
-	// .agentlink.toml instead so FindCurrentSession fails.
+	// A logged-in v2 environment, but Chdir into a dir with no .agentlink.toml so
+	// FindCurrentSession fails before any request is made.
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	os.MkdirAll(homeDir+"/.agentlink", 0755)
-	WriteConfigTOML(homeDir+"/.agentlink/config.toml", mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-	os.WriteFile(homeDir+"/.agentlink/credentials.json", []byte(`{"api_key":"sk_live_x"}`), 0600)
+	WriteAccountConfig(homeDir+"/.agentlink/config.toml", AgentConfig{
+		Server: mockSrv.URL, UserID: "u_1", Username: "kirby", DeviceID: "d_1", Device: "test-device", CurrentTeam: "tm_alpha",
+	})
+	WriteCredentials(homeDir+"/.agentlink/credentials.json", AgentCredentials{DeviceSession: "ds_x"})
 
 	noSessionDir := homeDir + "/no-session"
 	os.MkdirAll(noSessionDir, 0755)
@@ -108,16 +121,17 @@ func TestNetLockAcquire_noSession(t *testing.T) {
 }
 
 func TestNetLockRelease(t *testing.T) {
-	var capturedMethod, capturedPath string
+	var capturedMethod, capturedPath, capturedSession string
 	var capturedBody struct {
-		Project string `json:"project"`
-		Session string `json:"session"`
-		Path    string `json:"path"`
+		ProjectID string `json:"project_id"`
+		Session   string `json:"session"`
+		Path      string `json:"path"`
 	}
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
+		capturedSession = r.Header.Get("X-Agentlink-Session")
 		json.NewDecoder(r.Body).Decode(&capturedBody)
 		r.Body.Close()
 
@@ -137,20 +151,23 @@ func TestNetLockRelease(t *testing.T) {
 	if capturedMethod != "POST" {
 		t.Errorf("expected POST, got %s", capturedMethod)
 	}
-	if capturedPath != "/locks/release" {
-		t.Errorf("expected /locks/release, got %s", capturedPath)
+	if capturedPath != "/api/teams/tm_alpha/locks/release" {
+		t.Errorf("expected /api/teams/tm_alpha/locks/release, got %s", capturedPath)
 	}
-	if capturedBody.Project != "proj123" || capturedBody.Path != "index.html" || capturedBody.Session != "worker" {
+	if capturedBody.ProjectID != "proj123" || capturedBody.Path != "index.html" {
 		t.Errorf("unexpected body: %+v", capturedBody)
+	}
+	if capturedSession != "worker" {
+		t.Errorf("expected X-Agentlink-Session=worker, got %q", capturedSession)
 	}
 }
 
 func TestNetLockRelease_conflict(t *testing.T) {
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
-		json.NewEncoder(w).Encode(map[string]string{
+		json.NewEncoder(w).Encode(map[string]any{
 			"error": "file is locked by another session",
-			"owner": "dev:other",
+			"owner": map[string]string{"label": "someone / other"},
 		})
 	}))
 	defer mockSrv.Close()
@@ -175,12 +192,12 @@ func TestNetLockList(t *testing.T) {
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capturedMethod = r.Method
 		capturedPath = r.URL.Path
-		capturedProject = r.URL.Query().Get("project")
+		capturedProject = r.URL.Query().Get("project_id")
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"locks": []map[string]any{
-				{"path": "index.html", "owner": "test-device:worker", "acquired_at": int64(1000), "lease_expires_at": int64(1120)},
+				{"path": "index.html", "owner": map[string]string{"label": "kirby / worker"}, "acquired_at": int64(1000), "lease_expires_at": int64(1120)},
 			},
 		})
 	}))
@@ -197,11 +214,11 @@ func TestNetLockList(t *testing.T) {
 	if capturedMethod != "GET" {
 		t.Errorf("expected GET, got %s", capturedMethod)
 	}
-	if capturedPath != "/locks/list" {
-		t.Errorf("expected /locks/list, got %s", capturedPath)
+	if capturedPath != "/api/teams/tm_alpha/locks" {
+		t.Errorf("expected /api/teams/tm_alpha/locks, got %s", capturedPath)
 	}
 	if capturedProject != "proj123" {
-		t.Errorf("expected project=proj123, got %q", capturedProject)
+		t.Errorf("expected project_id=proj123, got %q", capturedProject)
 	}
 }
 

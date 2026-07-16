@@ -12,7 +12,11 @@ func RunPing() error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/agents/heartbeat", nil)
+	path, err := TeamPath(cfg, "/agents/heartbeat")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, nil)
 	if err != nil {
 		return err
 	}
@@ -22,34 +26,34 @@ func RunPing() error {
 	return nil
 }
 
-type sessionInfo struct {
-	Name    string `json:"name"`
-	Current string `json:"current"`
-}
-
 type agentInfo struct {
-	Device        string        `json:"device"`
-	Sessions      []string      `json:"sessions"`
-	SessionStatus []sessionInfo `json:"session_status"`
-	LastSeen      string        `json:"last_seen"`
-	Online        bool          `json:"online"`
+	UserID     string   `json:"user_id"`
+	Username   string   `json:"username"`
+	DeviceID   string   `json:"device_id"`
+	DeviceName string   `json:"device_name"`
+	ClientType string   `json:"client_type"`
+	Sessions   []string `json:"sessions"`
+	LastSeen   string   `json:"last_seen"`
+	Online     bool     `json:"online"`
 }
 
 type agentListResponse struct {
 	Agents []agentInfo `json:"agents"`
 }
 
+// RunList lists every device in the active team. The v2 API always returns the
+// full team roster, so the `all` flag is accepted for CLI compatibility but no
+// longer changes the request.
 func RunList(all bool) error {
 	cfg, creds, err := LoadAuth()
 	if err != nil {
 		return err
 	}
 
-	path := "/agents/list"
-	if all {
-		path += "?all=true"
+	path, err := TeamPath(cfg, "/agents")
+	if err != nil {
+		return err
 	}
-
 	resp, err := APIDo(cfg, creds, "GET", path, nil)
 	if err != nil {
 		return err
@@ -59,6 +63,11 @@ func RunList(all bool) error {
 	var list agentListResponse
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		return fmt.Errorf("cannot parse response: %w", err)
+	}
+
+	if len(list.Agents) == 0 {
+		fmt.Println("No agents")
+		return nil
 	}
 
 	for i, a := range list.Agents {
@@ -73,14 +82,16 @@ func RunList(all bool) error {
 		if sessions == "" {
 			sessions = "(none)"
 		}
-		fmt.Printf("Device:     %s\n", a.Device)
+		device := a.DeviceName
+		if device == "" {
+			device = a.DeviceID
+		}
+		fmt.Printf("User:       %s\n", a.Username)
+		fmt.Printf("Device:     %s\n", device)
 		fmt.Printf("Sessions:   %s\n", sessions)
 		fmt.Printf("Status:     %s\n", status)
 		if a.LastSeen != "" {
 			fmt.Printf("Last seen:  %s\n", a.LastSeen)
-		}
-		for _, ss := range a.SessionStatus {
-			fmt.Printf("  %-10s %s\n", ss.Name, ss.Current)
 		}
 	}
 

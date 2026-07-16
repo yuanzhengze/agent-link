@@ -11,7 +11,11 @@ func RunProjectCreate(name string) error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/projects", map[string]string{"name": name})
+	path, err := TeamPath(cfg, "/projects")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, map[string]string{"name": name})
 	if err != nil {
 		return err
 	}
@@ -39,7 +43,11 @@ func RunProjectList() error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "GET", "/projects", nil)
+	path, err := TeamPath(cfg, "/projects")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "GET", path, nil)
 	if err != nil {
 		return err
 	}
