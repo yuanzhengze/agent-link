@@ -9,76 +9,176 @@
 <body>
 <div id="app">
 
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark">◆</span>
-      <span class="brand-name">cowork</span>
-      <button id="btn-back" class="btn-back hidden" type="button">&larr; Projects</button>
-      <span id="current-project-name" class="current-project-name"></span>
-    </div>
-    <button id="btn-settings-toggle" class="btn-settings-toggle" type="button">Settings</button>
-  </header>
-
-  <section id="settings-bar" class="settings-bar hidden">
-    <div class="settings-row">
-      <label for="input-token">API token</label>
-      <input id="input-token" type="password" placeholder="sk_live_..." autocomplete="off">
-    </div>
-    <div class="settings-row">
-      <label for="input-session">Session</label>
-      <input id="input-session" type="text" placeholder="main" autocomplete="off">
-    </div>
-    <button id="btn-save-settings" class="btn-primary" type="button">Save</button>
-    <span id="settings-status" class="settings-status"></span>
-  </section>
-
-  <div id="global-error" class="global-error hidden"></div>
-
-  <main id="view-projects" class="view">
-    <div class="view-header">
-      <h1>Projects</h1>
-      <button id="btn-refresh-projects" class="btn-secondary" type="button">Refresh</button>
-    </div>
-    <ul id="project-list" class="project-list"></ul>
-    <p id="project-list-empty" class="empty-hint hidden">No projects yet, or you haven't set your API token yet — open Settings above.</p>
+  <!-- Authentication ---------------------------------------------------- -->
+  <main id="view-auth" class="auth-view">
+    <section class="auth-card">
+      <h1>Sign in to cowork</h1>
+      <form id="form-login">
+        <label>Username
+          <input id="input-login-username" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input id="input-login-password" type="password"
+                 autocomplete="current-password" minlength="10" required>
+        </label>
+        <button type="submit">Sign in</button>
+        <p class="auth-switch">No account?
+          <button id="btn-show-register" class="link-btn" type="button">Create one</button>
+        </p>
+      </form>
+      <form id="form-register" class="hidden">
+        <label>Username
+          <input id="input-register-username" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input id="input-register-password" type="password"
+                 autocomplete="new-password" minlength="10" required>
+        </label>
+        <label>Confirm password
+          <input id="input-register-confirm" type="password"
+                 autocomplete="new-password" minlength="10" required>
+        </label>
+        <button type="submit">Create account</button>
+        <p class="auth-switch">Have an account?
+          <button id="btn-show-login" class="link-btn" type="button">Sign in</button>
+        </p>
+      </form>
+      <form id="form-change-password" class="hidden">
+        <p class="auth-note">You must set a new password before continuing.</p>
+        <label>Current or temporary password
+          <input id="input-current-password" type="password"
+                 autocomplete="current-password" required>
+        </label>
+        <label>New password
+          <input id="input-new-password" type="password"
+                 autocomplete="new-password" minlength="10" required>
+        </label>
+        <button type="submit">Change password</button>
+      </form>
+      <p id="auth-error" class="auth-error hidden"></p>
+    </section>
   </main>
 
-  <main id="view-project" class="view hidden">
-    <div class="panes">
-
-      <section class="pane pane-tree">
-        <div class="pane-header">
-          <h2>Files</h2>
-          <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">Refresh</button>
-        </div>
-        <ul id="file-tree" class="file-tree"></ul>
-        <p id="file-tree-empty" class="empty-hint hidden">No files in this project.</p>
-      </section>
-
-      <section class="pane pane-preview">
-        <div class="pane-header">
-          <h2>Preview</h2>
-        </div>
-        <iframe id="preview-frame" class="preview-frame" title="Live preview"></iframe>
-      </section>
-
-      <section class="pane pane-side">
-        <div class="pane-header">
-          <h2>Online</h2>
-        </div>
-        <ul id="online-panel" class="online-panel"></ul>
-        <p id="online-panel-empty" class="empty-hint hidden">No agents seen yet.</p>
-
-        <div class="pane-header pane-header-alerts">
-          <h2>Alerts</h2>
-          <button id="btn-clear-alerts" class="btn-secondary btn-small" type="button">Clear</button>
-        </div>
-        <ul id="alert-stream" class="alert-stream"></ul>
-      </section>
-
-    </div>
+  <!-- Team onboarding --------------------------------------------------- -->
+  <main id="view-onboarding" class="view hidden">
+    <section class="onboarding-card">
+      <h1>Choose a team</h1>
+      <form id="form-create-team">
+        <input id="input-team-name" placeholder="Team name" required>
+        <button type="submit">Create team</button>
+      </form>
+      <div class="onboarding-sep">or</div>
+      <form id="form-join-team">
+        <input id="input-team-id" placeholder="tm_xxxxxxxx" required>
+        <input id="input-invite-code" type="password" placeholder="Invite code" required>
+        <button type="submit">Join team</button>
+      </form>
+      <p id="onboarding-error" class="auth-error hidden"></p>
+    </section>
   </main>
 
+  <!-- Authenticated dashboard ------------------------------------------- -->
+  <div id="view-app" class="hidden">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◆</span>
+        <span class="brand-name">cowork</span>
+        <button id="btn-back" class="btn-back hidden" type="button">&larr; Projects</button>
+        <span id="current-project-name" class="current-project-name"></span>
+      </div>
+      <div class="topbar-right">
+        <select id="team-switcher" class="team-switcher" aria-label="Active team"></select>
+        <button id="btn-create-team" class="btn-secondary btn-small" type="button">+ Team</button>
+        <button id="btn-join-team-top" class="btn-secondary btn-small" type="button">Join</button>
+        <button id="btn-members" class="btn-secondary btn-small" type="button">Members</button>
+        <span id="current-username" class="current-username"></span>
+        <button id="btn-logout" class="btn-secondary btn-small" type="button">Sign out</button>
+      </div>
+    </header>
+
+    <div id="global-error" class="global-error hidden"></div>
+
+    <main id="view-projects" class="view">
+      <div class="view-header">
+        <h1>Projects</h1>
+        <div>
+          <button id="btn-new-project" class="btn-secondary" type="button">New project</button>
+          <button id="btn-refresh-projects" class="btn-secondary" type="button">Refresh</button>
+        </div>
+      </div>
+      <ul id="project-list" class="project-list"></ul>
+      <p id="project-list-empty" class="empty-hint hidden">No projects yet — create one to get started.</p>
+    </main>
+
+    <main id="view-project" class="view hidden">
+      <div class="panes">
+        <section class="pane pane-tree">
+          <div class="pane-header">
+            <h2>Files</h2>
+            <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">Refresh</button>
+          </div>
+          <ul id="file-tree" class="file-tree"></ul>
+          <p id="file-tree-empty" class="empty-hint hidden">No files in this project.</p>
+        </section>
+
+        <section class="pane pane-preview">
+          <div class="pane-header">
+            <h2>Preview</h2>
+          </div>
+          <iframe id="preview-frame" class="preview-frame" title="Live preview"></iframe>
+        </section>
+
+        <section class="pane pane-side">
+          <div class="pane-header">
+            <h2>Online</h2>
+          </div>
+          <ul id="online-panel" class="online-panel"></ul>
+          <p id="online-panel-empty" class="empty-hint hidden">No agents seen yet.</p>
+
+          <div class="pane-header pane-header-alerts">
+            <h2>Alerts</h2>
+            <button id="btn-clear-alerts" class="btn-secondary btn-small" type="button">Clear</button>
+          </div>
+          <ul id="alert-stream" class="alert-stream"></ul>
+        </section>
+      </div>
+    </main>
+  </div>
+
+</div>
+
+<!-- Members panel (modal) ------------------------------------------------ -->
+<div id="members-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2>Team members</h2>
+      <button id="btn-members-close" class="link-btn" type="button">Close</button>
+    </div>
+    <ul id="member-list" class="member-list"></ul>
+    <div class="modal-actions">
+      <button id="btn-rotate-invite" class="btn-secondary btn-small hidden" type="button">Rotate invite code</button>
+      <button id="btn-leave-team" class="btn-danger btn-small" type="button">Leave team</button>
+    </div>
+    <p id="members-error" class="auth-error hidden"></p>
+  </div>
+</div>
+
+<!-- One-time invite code modal ------------------------------------------ -->
+<div id="invite-modal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <h2>Invite code</h2>
+      <button id="btn-invite-close" class="link-btn" type="button">Close</button>
+    </div>
+    <p class="modal-note">Share this once. It will not be shown again.</p>
+    <div class="invite-row">
+      <code id="invite-modal-team" class="invite-code"></code>
+    </div>
+    <div class="invite-row">
+      <code id="invite-modal-code" class="invite-code"></code>
+      <button id="btn-copy-invite" class="btn-secondary btn-small" type="button">Copy</button>
+    </div>
+  </div>
 </div>
 
 <div id="context-menu" class="context-menu hidden">
@@ -87,6 +187,8 @@
   <button data-action="force-release" type="button">Force release / take over</button>
 </div>
 
+<script src="/api.js"></script>
+<script src="/auth.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -7,6 +7,48 @@ import (
 	"testing"
 )
 
+// getGUIAsset fetches a static GUI asset from the v1 test server (which mounts
+// the same embedded web.FS) and returns its body as a string.
+func getGUIAsset(t *testing.T, path string) string {
+	t.Helper()
+	resp, err := http.Get(ts.URL + path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s expected 200, got %d", path, resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestServeGUIContainsAuthViews(t *testing.T) {
+	body := getGUIAsset(t, "/")
+	for _, marker := range []string{
+		`id="view-auth"`,
+		`id="form-login"`,
+		`id="form-register"`,
+		`id="input-login-username"`,
+		`id="input-register-password"`,
+		`id="form-change-password"`,
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("missing %s", marker)
+		}
+	}
+}
+
+func TestServeGUINoLongerContainsTokenInputs(t *testing.T) {
+	body := getGUIAsset(t, "/")
+	if strings.Contains(body, "input-token") || strings.Contains(body, "sk_live_") {
+		t.Fatal("GUI still exposes legacy token settings")
+	}
+}
+
 // TestServeGUI_indexOk verifies the embedded dashboard is served at GET /
 // with no Authorization header, and that the response contains the app's
 // mount point marker.
