@@ -1,5 +1,12 @@
 # 协同原型平台（cowork）实现计划
 
+> ⚠️ **已被取代（historical record）：** 本实现计划针对的是**旧版 v1**（共享注册
+> 密码 + API key + Bearer Token），仅作历史留存，**不再是有效的认证/部署说明**。
+> 当前认证与团队模型请以
+> [docs/superpowers/specs/2026-07-15-team-auth-design.md](superpowers/specs/2026-07-15-team-auth-design.md)
+> 为准，部署与运维见 [docs/deploy-server.md](deploy-server.md)、
+> [docs/team-auth-operations.md](team-auth-operations.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 按任务逐个实现。步骤用 `- [ ]` 复选框跟踪。
 
 **Goal:** 在 agentlink 之上增加"项目 + 文件锁 + 同步 + 预览 + GUI"协同层，让多 PM 在同一静态 HTML 原型上秒级同步、且 Agent 按文件串行写入不互相覆盖。

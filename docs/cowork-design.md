@@ -1,5 +1,13 @@
 # 协同原型平台设计（cowork）
 
+> ⚠️ **已被取代（historical record）：** 本文档记录的是**旧版 v1**（共享注册密码
+> + API key + Bearer Token）的设计，仅作历史留存，**不再是有效的认证/部署说明**。
+> 当前认证与团队模型请以
+> [docs/superpowers/specs/2026-07-15-team-auth-design.md](superpowers/specs/2026-07-15-team-auth-design.md)
+> 为准（账号 + 团队 + 角色 + 设备会话 + HttpOnly Cookie），部署见
+> [docs/deploy-server.md](deploy-server.md) 与
+> [docs/team-auth-operations.md](team-auth-operations.md)。
+
 > 在 agentlink 之上增加"项目 + 文件锁 + 同步 + 预览 + GUI"协同层，解决多 PM 同一原型协作时的**秒级同步**与**Agent 互相覆盖**问题。
 
 ## 1. 背景与问题

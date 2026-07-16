@@ -19,9 +19,11 @@ go build -o agentlink ./cmd/agentlink/
 
 ```bash
 sudo useradd -r -s /usr/sbin/nologin agent-link
-sudo mkdir -p /opt/agent-link /etc/agent-link
+sudo mkdir -p /opt/agent-link /etc/agent-link /var/lib/agent-link/data
 sudo cp server /opt/agent-link/
-sudo chown -R agent-link:agent-link /opt/agent-link
+# agentlink-admin is used for out-of-band password resets (see the operations guide)
+go build -o agentlink-admin ./cmd/agentlink-admin/ && sudo cp agentlink-admin /opt/agent-link/
+sudo chown -R agent-link:agent-link /opt/agent-link /var/lib/agent-link
 ```
 
 ## Step 3: Configure Redis
@@ -43,14 +45,24 @@ sudo chown agent-link:agent-link /var/lib/agent-link/redis
 
 ## Step 4: Create the environment file
 
-Create `/etc/agent-link/server.env` (readable only by root):
+Create `/etc/agent-link/server.env` (readable only by root). There is **no
+shared registration password** — users self-register accounts through the CLI or
+Web GUI, so this file only carries deployment settings:
 
 ```bash
 sudo tee /etc/agent-link/server.env > /dev/null <<'EOF'
-REGISTER_PASSWORD=<your-password>
+REDIS_ADDR=localhost:6379
+PUBLIC_URL=https://your-domain.com
+COOKIE_SECURE=true
+DATA_DIR=/var/lib/agent-link/data
 EOF
 sudo chmod 600 /etc/agent-link/server.env
 ```
+
+> **HTTPS is required in production.** With a non-loopback `PUBLIC_URL`, the
+> server refuses to start unless the URL is `https://` and `COOKIE_SECURE=true`.
+> Terminate TLS at Caddy/nginx (Step 6 note) and point `PUBLIC_URL` at the public
+> HTTPS origin.
 
 ## Step 5: Install systemd units
 
@@ -69,19 +81,20 @@ curl http://localhost:8080/health
 # → {"ok":true,"redis":"connected"}
 ```
 
-## Step 6: Register devices
+## Step 6: Create the first account
 
-From any client machine:
-
-```bash
-agentlink init --server http://<server-ip>:8080 --password <password>
-```
-
-Or over HTTPS (after configuring Caddy/nginx):
+Users self-register through the CLI (or the Web GUI at `PUBLIC_URL`). From any
+client machine:
 
 ```bash
-agentlink init --server https://your-domain.com --password <password>
+agentlink register --server https://your-domain.com --username kirby
+agentlink team create "Product"
 ```
+
+`register` prompts for a password on the terminal, creates the account, logs this
+device in, and stores a device session — there is no token to copy. `team create`
+makes the account the team Owner and prints a one-time invite code for teammates
+to `agentlink team join <team_id> <invite_code>`.
 
 ## Environment variables
 
@@ -89,9 +102,14 @@ agentlink init --server https://your-domain.com --password <password>
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `:8080` | Server listen address |
 | `REDIS_ADDR` | `localhost:6379` | Redis server address |
-| `REGISTER_PASSWORD` | (required) | Password for device registration — set in `/etc/agent-link/server.env` |
+| `DATA_DIR` | `./data` | On-disk per-team project Git repositories |
+| `PUBLIC_URL` | `http://localhost:8080` | Public origin; sets session cookie scope |
+| `COOKIE_SECURE` | `false` | Send session cookies only over HTTPS (set `true` in prod) |
 
-To change the password, edit `/etc/agent-link/server.env` and run `sudo systemctl restart agent-link-server`.
+To change settings, edit `/etc/agent-link/server.env` and run
+`sudo systemctl restart agent-link-server`. Forgotten passwords are reset
+out-of-band with `agentlink-admin user reset-password <username>` — see
+[team-auth-operations.md](team-auth-operations.md).
 
 ## Removal
 
@@ -103,8 +121,8 @@ sudo systemctl disable --now agent-link-server redis
 sudo rm /etc/systemd/system/agent-link-server.service /etc/systemd/system/redis.service
 sudo systemctl daemon-reload
 
-# 3. Delete Redis data (agentlink keys only — safe for shared Redis)
-redis-cli KEYS "agentlink:*" | xargs -r redis-cli DEL
+# 3. Delete Redis data (agentlink v2 keys only — safe for shared Redis)
+redis-cli KEYS "agentlink:v2:*" | xargs -r redis-cli DEL
 
 # 4. Delete binaries, config, and data
 sudo rm -rf /opt/agent-link /etc/agent-link /var/lib/agent-link
