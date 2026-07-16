@@ -132,7 +132,7 @@
     el.viewProjects.classList.add("hidden");
     el.viewProject.classList.remove("hidden");
 
-    el.previewFrame.src = "/preview/teams/" +
+    el.previewFrame.src = "/preview/" +
       encodeURIComponent(state.team.id) + "/" +
       encodeURIComponent(id) + "/";
 

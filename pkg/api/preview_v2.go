@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,11 +15,10 @@ import (
 )
 
 // handlePreviewV2 serves a team project's static prototype files to
-// authenticated team members only. It bypasses the legacy authMiddleware (see
-// skipAuth), so it authenticates the Web Session cookie and verifies team
-// membership + project ownership itself. HTML responses get a cookie-based
-// live-reload script injected (no token in the URL); other files are served
-// as-is with a derived Content-Type.
+// authenticated team members only. It authenticates the Web Session cookie and
+// verifies team membership + project ownership itself. HTML responses get a
+// cookie-based live-reload script injected (no token in the URL); other files
+// are served as-is with a derived Content-Type.
 func (s *Server) handlePreviewV2(w http.ResponseWriter, r *http.Request) {
 	teamID := r.PathValue("team_id")
 	projectID := r.PathValue("project_id")
@@ -125,4 +125,20 @@ func liveReloadScriptV2(teamID, projectID string) (string, error) {
 ws.onmessage=function(e){try{var m=JSON.parse(e.data);if(m.type==='file_changed'&&m.project_id===%s)location.reload();}catch(_){}}})();
 </script>
 `, teamJS, projectJS, projectJS), nil
+}
+
+// injectBeforeBodyClose inserts script immediately before the last
+// case-insensitive "</body>" tag in html, or appends it at the end of the
+// document if no such tag is present.
+func injectBeforeBodyClose(html []byte, script string) []byte {
+	idx := bytes.LastIndex(bytes.ToLower(html), []byte("</body>"))
+	if idx == -1 {
+		out := make([]byte, 0, len(html)+len(script))
+		out = append(out, html...)
+		return append(out, []byte(script)...)
+	}
+	out := make([]byte, 0, len(html)+len(script))
+	out = append(out, html[:idx]...)
+	out = append(out, []byte(script)...)
+	return append(out, html[idx:]...)
 }

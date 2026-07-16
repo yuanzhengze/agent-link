@@ -34,7 +34,7 @@ func TestV2PreviewRequiresMembership(t *testing.T) {
 	project := createProjectV2HTTP(t, owner, teamID, "Preview Mem Project")
 	seedFileV2(t, owner, teamID, project.ID, "index.html", "<html><body>preview-ok</body></html>")
 
-	previewPath := "/preview/teams/" + teamID + "/" + project.ID + "/index.html"
+	previewPath := "/preview/" + teamID + "/" + project.ID + "/index.html"
 
 	// Member can view.
 	resp, body := authJSON(t, http.MethodGet, previewPath, nil, map[string]string{"Cookie": withCookies(owner)})
@@ -69,7 +69,7 @@ func TestV2PreviewLiveReloadUsesCookieWSWithoutTokenQuery(t *testing.T) {
 	project := createProjectV2HTTP(t, owner, teamID, "Preview Reload Project")
 	seedFileV2(t, owner, teamID, project.ID, "index.html", "<html><body>hi</body></html>")
 
-	resp, body := authJSON(t, http.MethodGet, "/preview/teams/"+teamID+"/"+project.ID+"/index.html", nil, map[string]string{
+	resp, body := authJSON(t, http.MethodGet, "/preview/"+teamID+"/"+project.ID+"/index.html", nil, map[string]string{
 		"Cookie": withCookies(owner),
 	})
 	if resp.StatusCode != http.StatusOK {
@@ -99,7 +99,7 @@ func TestV2PreviewNonHTMLNotInjected(t *testing.T) {
 	project := createProjectV2HTTP(t, owner, teamID, "Preview Asset Project")
 	seedFileV2(t, owner, teamID, project.ID, "styles/site.css", "body{color:red}")
 
-	resp, body := authJSON(t, http.MethodGet, "/preview/teams/"+teamID+"/"+project.ID+"/styles/site.css", nil, map[string]string{
+	resp, body := authJSON(t, http.MethodGet, "/preview/"+teamID+"/"+project.ID+"/styles/site.css", nil, map[string]string{
 		"Cookie": withCookies(owner),
 	})
 	if resp.StatusCode != http.StatusOK {
@@ -129,7 +129,7 @@ func TestV2PreviewDirectoryIs404(t *testing.T) {
 	seedFileV2(t, owner, teamID, project.ID, "assets/logo.txt", "logo")
 
 	// "assets" is a directory, not a file.
-	resp, body := authJSON(t, http.MethodGet, "/preview/teams/"+teamID+"/"+project.ID+"/assets", nil, map[string]string{
+	resp, body := authJSON(t, http.MethodGet, "/preview/"+teamID+"/"+project.ID+"/assets", nil, map[string]string{
 		"Cookie": withCookies(owner),
 	})
 	if resp.StatusCode != http.StatusNotFound {
@@ -152,7 +152,7 @@ func TestV2PreviewRejectsTraversal(t *testing.T) {
 	// Note: "../" segments are cleaned by the HTTP layer before routing, so
 	// they never reach the handler; the .git guard is what safeApplyPath adds.
 	for _, p := range []string{".git/config", ".GIT/config", "sub/.git/x"} {
-		resp, body := authJSON(t, http.MethodGet, "/preview/teams/"+teamID+"/"+project.ID+"/"+p, nil, map[string]string{
+		resp, body := authJSON(t, http.MethodGet, "/preview/"+teamID+"/"+project.ID+"/"+p, nil, map[string]string{
 			"Cookie": withCookies(owner),
 		})
 		if resp.StatusCode != http.StatusNotFound {

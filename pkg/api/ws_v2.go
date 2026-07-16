@@ -6,9 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
+
+// wsWriteTimeout bounds how long a single broadcast write to one connection
+// may block, so one slow/dead subscriber can never stall the hub.
+const wsWriteTimeout = 5 * time.Second
 
 // subscriptionKeyV2 identifies a team project's broadcast channel by an
 // unambiguous (team, project) pair so a project id can never be confused

@@ -33,12 +33,11 @@ func main() {
 	}
 
 	srv := api.NewWithOptions(api.ServerOptions{
-		Addr:             addr,
-		DataDir:          dataDir,
-		Redis:            rdb,
-		CookieSecure:     cfg.CookieSecure,
-		PublicURL:        cfg.PublicURL,
-		RegisterPassword: cfg.RegisterPassword,
+		Addr:         addr,
+		DataDir:      dataDir,
+		Redis:        rdb,
+		CookieSecure: cfg.CookieSecure,
+		PublicURL:    cfg.PublicURL,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

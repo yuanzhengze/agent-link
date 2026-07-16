@@ -61,7 +61,7 @@ func setupAuthV2TestServer(t *testing.T) {
 			})
 		})),
 	)
-	authV2TS = httptest.NewServer(authV2Srv.authMiddleware(authV2Srv.mux))
+	authV2TS = httptest.NewServer(authV2Srv.mux)
 	authTestOrigin = authV2TS.URL
 	authV2Srv.publicOrigin = authTestOrigin
 	t.Cleanup(func() {
@@ -701,7 +701,7 @@ func TestAuthCookieSecureFlag(t *testing.T) {
 		CookieSecure: true,
 		PublicURL:    "https://app.example.com",
 	})
-	ts := httptest.NewServer(secureSrv.authMiddleware(secureSrv.mux))
+	ts := httptest.NewServer(secureSrv.mux)
 	defer ts.Close()
 
 	resp, _ := authJSONOn(ts, http.MethodPost, "/api/auth/register", map[string]string{
@@ -799,7 +799,7 @@ func TestProductionMuxOmitsAuthTestRoutes(t *testing.T) {
 		DataDir:   t.TempDir(),
 		PublicURL: "http://localhost:8080",
 	})
-	handler := srv.authMiddleware(srv.mux)
+	handler := srv.mux
 
 	for _, path := range []string{
 		"/api/auth/test-protected",

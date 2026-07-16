@@ -6,18 +6,16 @@ import (
 )
 
 type Config struct {
-	RedisAddr        string
-	RegisterPassword string
-	PublicURL        string
-	CookieSecure     bool
+	RedisAddr    string
+	PublicURL    string
+	CookieSecure bool
 }
 
 func Load() *Config {
 	return &Config{
-		RedisAddr:        getEnv("REDIS_ADDR", "localhost:6379"),
-		RegisterPassword: getEnv("REGISTER_PASSWORD", ""),
-		PublicURL:        getEnv("PUBLIC_URL", "http://localhost:8080"),
-		CookieSecure:     getEnvBool("COOKIE_SECURE", false),
+		RedisAddr:    getEnv("REDIS_ADDR", "localhost:6379"),
+		PublicURL:    getEnv("PUBLIC_URL", "http://localhost:8080"),
+		CookieSecure: getEnvBool("COOKIE_SECURE", false),
 	}
 }
 

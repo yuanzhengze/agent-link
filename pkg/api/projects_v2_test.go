@@ -2010,7 +2010,7 @@ func TestV2ProjectProductionMuxOmitsLoadTestRoute(t *testing.T) {
 		nil,
 	)
 	resp := httptest.NewRecorder()
-	srv.authMiddleware(srv.mux).ServeHTTP(resp, req)
+	srv.mux.ServeHTTP(resp, req)
 	if resp.Code != http.StatusNotFound && resp.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("production project test route returned %d; want 404 or 405", resp.Code)
 	}

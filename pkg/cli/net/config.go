@@ -35,12 +35,11 @@ type AgentConfig struct {
 }
 
 // AgentCredentials stores the single opaque Device Session used for
-// `Authorization: Device`. The legacy APIKey field is retained only so the not-
-// yet-migrated v1 net/runtime callers keep compiling during the CLI cutover; it
-// is never written by v2 code and is removed once every caller uses APIDo.
+// `Authorization: Device`. This is the only credential the v2 CLI recognizes; a
+// legacy api_key-only file is rejected by LoadCredentialsAt (missing
+// device_session), so a stale v1 credential can never authenticate.
 type AgentCredentials struct {
 	DeviceSession string `json:"device_session"`
-	APIKey        string `json:"api_key,omitempty"`
 }
 
 // parseAgentConfig builds an AgentConfig from raw config.toml content without

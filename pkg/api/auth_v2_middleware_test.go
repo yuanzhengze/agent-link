@@ -202,7 +202,7 @@ func TestPublicURLOriginMismatchOnRegister(t *testing.T) {
 		CookieSecure: true,
 		PublicURL:    "https://app.example.com",
 	})
-	ts := httptest.NewServer(srv.authMiddleware(srv.mux))
+	ts := httptest.NewServer(srv.mux)
 	defer ts.Close()
 
 	body := map[string]string{

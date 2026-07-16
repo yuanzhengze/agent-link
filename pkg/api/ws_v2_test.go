@@ -11,6 +11,18 @@ import (
 	"github.com/coder/websocket"
 )
 
+// expectNoMessage asserts that no message arrives on c within timeout. The
+// context timeout also closes the read, so callers should run it last.
+func expectNoMessage(t *testing.T, c *websocket.Conn, timeout time.Duration) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_, data, err := c.Read(ctx)
+	if err == nil {
+		t.Fatalf("expected no message, but got one: %s", data)
+	}
+}
+
 // dialWSV2 dials the shared authV2 test server's team WebSocket endpoint with
 // the given headers (cookie or device Authorization). It returns the handshake
 // response so callers can assert the HTTP status of a rejected upgrade.

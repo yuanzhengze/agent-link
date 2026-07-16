@@ -42,7 +42,7 @@ func previewV2(t *testing.T, session *http.Response, teamID, projectID, path str
 	if session != nil {
 		headers["Cookie"] = withCookies(session)
 	}
-	return authJSON(t, http.MethodGet, "/preview/teams/"+teamID+"/"+projectID+"/"+path, nil, headers)
+	return authJSON(t, http.MethodGet, "/preview/"+teamID+"/"+projectID+"/"+path, nil, headers)
 }
 
 func treeFile(tree TreeResponseV2, path string) *TreeFileEntryV2 {

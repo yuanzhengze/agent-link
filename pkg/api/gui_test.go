@@ -60,7 +60,7 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 		"/locks/acquire",
 		"/agents",
 		"/ws?project=",
-		"/preview/teams/",
+		"/preview/",
 	} {
 		if !strings.Contains(dash, marker) {
 			t.Errorf("dashboard.js missing team-scoped route %q", marker)
@@ -136,17 +136,18 @@ func TestServeGUI_styleCssOk(t *testing.T) {
 	}
 }
 
-// TestServeGUI_apiStillRequiresAuth locks in that the new GET / route and
-// static-asset skipAuth exemptions did not over-broaden: data endpoints
-// like GET /projects must still 401 without a Bearer token.
+// TestServeGUI_apiStillRequiresAuth locks in that serving the static GUI at
+// GET / did not over-broaden auth: a team data endpoint like GET
+// /api/teams/{team_id}/projects must still 401 without a session/device
+// credential.
 func TestServeGUI_apiStillRequiresAuth(t *testing.T) {
-	resp, err := http.Get(ts.URL + "/projects")
+	resp, err := http.Get(ts.URL + "/api/teams/tm_test/projects")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for GET /projects without a token, got %d", resp.StatusCode)
+		t.Fatalf("expected 401 for GET team projects without credentials, got %d", resp.StatusCode)
 	}
 }

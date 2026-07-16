@@ -695,7 +695,7 @@ func TestProductionMuxOmitsTeamTestRoutes(t *testing.T) {
 		DataDir:   t.TempDir(),
 		PublicURL: "http://localhost:8080",
 	})
-	handler := srv.authMiddleware(srv.mux)
+	handler := srv.mux
 	req := httptest.NewRequest(http.MethodGet, "/api/teams/team_abc/test-actor", nil)
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
