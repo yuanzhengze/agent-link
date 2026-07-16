@@ -197,6 +197,109 @@ func (s *Server) handleListProjectsV2(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, listProjectsV2Response{Projects: projects})
 }
 
+type TreeFileEntryV2 struct {
+	Path   string       `json:"path"`
+	Locked bool         `json:"locked"`
+	Owner  *LockOwnerV2 `json:"owner,omitempty"`
+}
+
+type TreeResponseV2 struct {
+	Files []TreeFileEntryV2 `json:"files"`
+}
+
+type SnapshotResponseV2 struct {
+	HeadCommit string              `json:"head_commit"`
+	Files      []SnapshotFileEntry `json:"files"`
+}
+
+// handleTreeV2 lists every file in a team project's work tree along with its
+// structured lock status, for the GUI's file tree view.
+func (s *Server) handleTreeV2(w http.ResponseWriter, r *http.Request) {
+	actor, ok := ActorFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("project_id")
+	if _, err := s.loadTeamProject(r.Context(), actor.TeamID, projectID); err != nil {
+		if errors.Is(err, errProjectNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	paths, err := listProjectFiles(s.projectDirV2(actor.TeamID, projectID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to walk project directory")
+		return
+	}
+
+	files := make([]TreeFileEntryV2, 0, len(paths))
+	for _, rel := range paths {
+		owner, _, active := s.lockStatusV2(r, actor.TeamID, projectID, rel)
+		entry := TreeFileEntryV2{Path: rel, Locked: active}
+		if active {
+			ownerCopy := owner
+			entry.Owner = &ownerCopy
+		}
+		files = append(files, entry)
+	}
+
+	writeJSON(w, http.StatusOK, TreeResponseV2{Files: files})
+}
+
+// handleSnapshotV2 returns the full content of every file in a team project's
+// work tree plus the current head_commit. It holds the same per-project mutex
+// as apply, spanning both the head_commit read and every file read, so the
+// returned bytes always correspond to the returned head_commit.
+func (s *Server) handleSnapshotV2(w http.ResponseWriter, r *http.Request) {
+	actor, ok := ActorFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	projectID := r.PathValue("project_id")
+	if _, err := s.loadTeamProject(r.Context(), actor.TeamID, projectID); err != nil {
+		if errors.Is(err, errProjectNotFound) {
+			writeError(w, http.StatusNotFound, "project not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	mu := s.projectLock(teamProjectMutexKey(actor.TeamID, projectID))
+	mu.Lock()
+	defer mu.Unlock()
+
+	headCommit, err := s.rdb.HGet(r.Context(), projectV2Key(projectID), "head_commit").Result()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	dir := s.projectDirV2(actor.TeamID, projectID)
+	paths, err := listProjectFiles(dir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to walk project directory")
+		return
+	}
+
+	files := make([]SnapshotFileEntry, 0, len(paths))
+	for _, rel := range paths {
+		content, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to read file")
+			return
+		}
+		files = append(files, SnapshotFileEntry{Path: rel, Content: string(content)})
+	}
+
+	writeJSON(w, http.StatusOK, SnapshotResponseV2{HeadCommit: headCommit, Files: files})
+}
+
 func validateProjectNameV2(raw string) (string, error) {
 	name := strings.TrimSpace(raw)
 	count := utf8.RuneCountInString(name)

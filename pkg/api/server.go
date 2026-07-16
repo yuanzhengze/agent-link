@@ -39,6 +39,7 @@ type Server struct {
 	mux                   *http.ServeMux
 	srv                   *http.Server
 	hub                   Broadcaster
+	hubV2                 BroadcasterV2
 	projMu                sync.Map
 	previewToken          string
 	authService           *auth.Service
@@ -166,6 +167,9 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("POST /api/teams/{team_id}/locks/acquire", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleLockAcquireV2)))))
 	s.mux.Handle("POST /api/teams/{team_id}/locks/release", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleLockReleaseV2)))))
 	s.mux.Handle("GET /api/teams/{team_id}/locks", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleLockListV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/projects/{project_id}/apply", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleApplyV2)))))
+	s.mux.Handle("GET /api/teams/{team_id}/projects/{project_id}/tree", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTreeV2))))
+	s.mux.Handle("GET /api/teams/{team_id}/projects/{project_id}/snapshot", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleSnapshotV2))))
 
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken
