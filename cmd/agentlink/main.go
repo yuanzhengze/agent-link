@@ -18,6 +18,14 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "register":
+		cmdRegister(os.Args[2:])
+	case "login":
+		cmdLogin(os.Args[2:])
+	case "logout":
+		cmdLogout(os.Args[2:])
+	case "team":
+		cmdTeam(os.Args[2:])
 	case "init":
 		cmdInit(os.Args[2:])
 	case "send":
@@ -59,7 +67,16 @@ func printUsage() {
 	fmt.Print(`agentlink - Agent communication tool
 
 Usage:
-  agentlink init --server <url> --password <pw> [--device <name>] [./path]
+  agentlink register --server <url> --username <name> [--device <name>]
+  agentlink login --server <url> --username <name> [--device <name>]
+  agentlink logout
+  agentlink team list
+  agentlink team create <name>
+  agentlink team join <team_id> <invite_code>
+  agentlink team use <team_id>
+  agentlink team members
+  agentlink team leave
+  agentlink init [--agent claude] [--no-poll] [--force] [./path]
   agentlink send [--interrupt] [--title <title>] <target> <content>
   agentlink pull [--all]
   agentlink whoami
@@ -84,6 +101,90 @@ Usage:
   agentlink restart
   agentlink uninstall
 `)
+}
+
+func cmdRegister(args []string) {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	server := fs.String("server", "", "API server URL")
+	username := fs.String("username", "", "Account username")
+	device := fs.String("device", "", "Device name (default: hostname)")
+	fs.Parse(args)
+
+	if *server == "" || *username == "" {
+		fmt.Fprintln(os.Stderr, "usage: agentlink register --server <url> --username <name> [--device <name>]")
+		os.Exit(1)
+	}
+	if err := api.RunRegister(*server, *username, *device, api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLogin(args []string) {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	server := fs.String("server", "", "API server URL")
+	username := fs.String("username", "", "Account username")
+	device := fs.String("device", "", "Device name (default: hostname)")
+	fs.Parse(args)
+
+	if *server == "" || *username == "" {
+		fmt.Fprintln(os.Stderr, "usage: agentlink login --server <url> --username <name> [--device <name>]")
+		os.Exit(1)
+	}
+	if err := api.RunLogin(*server, *username, *device, api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLogout(args []string) {
+	if err := api.RunLogout(api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdTeam(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink team list|create|join|use|members|leave [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "list":
+		runTeamCmd(api.RunTeamList())
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team create <name>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamCreate(strings.Join(args[1:], " ")))
+	case "join":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team join <team_id> <invite_code>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamJoin(args[1], args[2]))
+	case "use":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team use <team_id>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamUse(args[1]))
+	case "members":
+		runTeamCmd(api.RunTeamMembers())
+	case "leave":
+		runTeamCmd(api.RunTeamLeave())
+	default:
+		fmt.Fprintf(os.Stderr, "unknown team subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runTeamCmd(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
 }
 
 func cmdInit(args []string) {

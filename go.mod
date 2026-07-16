@@ -7,6 +7,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/redis/go-redis/v9 v9.19.0
 	golang.org/x/crypto v0.48.0
+	golang.org/x/term v0.40.0
 )
 
 require (
