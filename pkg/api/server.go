@@ -170,6 +170,10 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("POST /api/teams/{team_id}/projects/{project_id}/apply", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleApplyV2)))))
 	s.mux.Handle("GET /api/teams/{team_id}/projects/{project_id}/tree", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTreeV2))))
 	s.mux.Handle("GET /api/teams/{team_id}/projects/{project_id}/snapshot", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleSnapshotV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/agents/heartbeat", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleHeartbeatV2))))
+	s.mux.Handle("GET /api/teams/{team_id}/agents", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleListAgentsV2))))
+	s.mux.Handle("PATCH /api/teams/{team_id}/agents/sessions", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handlePatchSessionsV2))))
+	s.mux.Handle("DELETE /api/teams/{team_id}/agents/sessions", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleDeleteSessionV2))))
 
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken
