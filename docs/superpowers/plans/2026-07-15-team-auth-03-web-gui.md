@@ -467,10 +467,11 @@ Lock bodies are `{project_id, path}`; session and owner are not client fields.
 
 - [ ] **Step 4: Migrate preview and WS**
 
-Preview:
+Preview (transitional path while v1 `/preview/{id}` still exists; drop the
+`teams/` segment at the Plan 4 cutover):
 
 ```js
-previewFrame.src = "/preview/" +
+previewFrame.src = "/preview/teams/" +
   encodeURIComponent(team.id) + "/" +
   encodeURIComponent(project.id) + "/";
 ```

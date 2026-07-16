@@ -315,6 +315,16 @@ POST   /api/teams/{team_id}/leave
 
 服务端验证 Web Session、团队成员关系和 project 归属后才读取文件。iframe 和 live-reload WebSocket 复用浏览器 Cookie。删除现有全局 preview token。
 
+> **过渡实现说明**：在删除 v1 `/preview/{id}` 路由之前，v2 预览临时挂在
+> `/preview/teams/{team_id}/{project_id}/`（多出一个字面量 `teams/` 段），以避免
+> Go ServeMux 因 v2 模式更具体而覆盖 v1 预览路由。Plan 4 清理 v1 后回落到上述规范路径。
+
+> **已知安全限制（同源存储型 XSS）**：预览与 `/api/...`、GUI 同源提供成员自行写入的
+> 任意 HTML，因此某成员植入的 `<script>` 在另一成员打开预览时会在应用 origin 上执行，
+> 可读取可读的 `al_csrf` 并以查看者身份发起认证写操作（团队内提权）。这是内部可信成员之间
+> 的威胁，与 v1 既有模型一致。已做的最小缓解：预览响应统一带 `X-Content-Type-Options:
+> nosniff`。彻底修复需将预览隔离到独立 origin/子域（后续硬化项，需单独设计 Cookie 作用域）。
+
 外部匿名分享不在本期范围；后续可单独增加可撤销、只读、限时的分享链接。
 
 ## 10. 错误语义

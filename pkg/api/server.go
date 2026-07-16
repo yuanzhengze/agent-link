@@ -39,7 +39,7 @@ type Server struct {
 	mux                   *http.ServeMux
 	srv                   *http.Server
 	hub                   Broadcaster
-	hubV2                 BroadcasterV2
+	hubV2                 *HubV2
 	projMu                sync.Map
 	previewToken          string
 	authService           *auth.Service
@@ -175,6 +175,17 @@ func NewWithOptions(opts ServerOptions) *Server {
 	hub.previewToken = s.previewToken
 	s.hub = hub
 	s.mux.HandleFunc("GET /ws", hub.handleWS)
+
+	s.hubV2 = NewHubV2()
+	s.mux.Handle("GET /api/teams/{team_id}/ws", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleWSV2))))
+	// Transitional path: the canonical target is /preview/{team_id}/{project_id}/
+	// (see the team-auth design), but that pattern would shadow the still-live v1
+	// /preview/{id}/ route (Go's ServeMux picks the more specific v2 pattern for
+	// any >=2-segment path, breaking v1 preview). The literal "teams/" segment
+	// keeps the two routes disjoint until Plan 4 removes v1 /preview, at which
+	// point this drops to the canonical form. Project ids are random ("p_..."),
+	// never "teams", so a v1 preview URL can never collide with this prefix.
+	s.mux.HandleFunc("GET /preview/teams/{team_id}/{project_id}/{path...}", s.handlePreviewV2)
 
 	s.mux.Handle("GET /", http.FileServer(http.FS(web.FS)))
 

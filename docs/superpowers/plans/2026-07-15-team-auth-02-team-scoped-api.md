@@ -422,8 +422,14 @@ Then it validates team membership and project ownership before `websocket.Accept
 Route:
 
 ```go
+// Transitional: the canonical target is /preview/{team_id}/{project_id}/{path...}
+// but that would shadow the still-live v1 /preview/{id}/{path...} route (Go's
+// ServeMux picks the more specific v2 pattern for any >=2-segment path, so v1
+// preview breaks). The literal "teams/" segment keeps the routes disjoint until
+// Plan 4 removes v1 /preview, at which point this drops to the canonical form.
+// Project ids are random ("p_..."), never "teams", so no collision is possible.
 s.mux.HandleFunc(
-	"GET /preview/{team_id}/{project_id}/{path...}",
+	"GET /preview/teams/{team_id}/{project_id}/{path...}",
 	s.handlePreviewV2,
 )
 ```

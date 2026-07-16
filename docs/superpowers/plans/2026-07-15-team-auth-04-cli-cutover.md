@@ -551,6 +551,7 @@ Before deleting v1 files, move only still-used helpers:
 
 - `writeJSON`, `writeError` → `http_helpers.go`.
 - username/device/session regex → `validation.go`.
+- `injectBeforeBodyClose` (currently in `preview.go`, used by `preview_v2.go`) → a surviving v2 file (e.g. `preview_v2.go` or `http_helpers.go`).
 - hardened `safeApplyPath`, Git helpers, event interfaces must already exist in v2 files from Plan 2.
 
 Run v2 tests after extraction before deleting anything.
@@ -562,9 +563,14 @@ Delete:
 - `contextKeyDevice`.
 - `registerPassword`.
 - `previewToken` and `generatePreviewToken`.
-- old route registration.
+- old route registration (including v1 `GET /preview/{id}/{path...}`).
 - SHA-256 API-key lookup and `agentlink:api_key:*`.
 - public unauthenticated preview exemption.
+
+Once v1 `/preview/{id}` is gone, rename the v2 preview route from the
+transitional `GET /preview/teams/{team_id}/{project_id}/{path...}` to the
+canonical `GET /preview/{team_id}/{project_id}/{path...}` and update the Web GUI
+`previewFrame.src` (drop the `teams/` segment).
 
 `config.Config` becomes:
 
