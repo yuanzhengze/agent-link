@@ -1,61 +1,52 @@
 package rt
 
 import (
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/team/agentlink/pkg/adapter"
 	api "github.com/team/agentlink/pkg/cli/net"
 )
 
+// InitOptions configures a purely local team-workspace initialization. Account
+// and team identity come from a prior `agentlink login` + `agentlink team use`;
+// init performs no registration and makes no network calls.
 type InitOptions struct {
-	Server   string
-	Password string
-	Device   string
-	Path     string
-	Agent    string
-	NoPoll   bool
-	Force    bool
-	// Interactive is set when init ran the terminal wizard. It lets RunInit
-	// re-prompt for the password on a 401 instead of failing outright.
-	Interactive bool
+	Path   string
+	Agent  string
+	NoPoll bool
+	Force  bool
 }
 
-type registerRequest struct {
-	Device           string   `json:"device"`
-	Sessions         []string `json:"sessions"`
-	RegisterPassword string   `json:"register_password"`
-}
+// sessionNames are the tmux sessions init always creates.
+var sessionNames = []string{"main", "worker"}
 
-type registerResponse struct {
-	APIKey       string   `json:"api_key"`
-	Device       string   `json:"device"`
-	Sessions     []string `json:"sessions"`
-	RegisteredAt string   `json:"registered_at"`
-}
+// launchSessionsFn is indirected so tests can run init end to end without
+// spawning real tmux/claude processes.
+var launchSessionsFn = launchSessions
 
 func RunInit(opts *InitOptions) error {
 	if opts.Agent == "" {
 		opts.Agent = "claude"
 	}
 
-	// Resolve device name
-	device := opts.Device
-	if device == "" {
-		hostname, err := os.Hostname()
-		if err != nil {
-			return fmt.Errorf("cannot determine hostname: %w", err)
-		}
-		device = hostname
+	// Identity must already exist: init is local-only and never registers.
+	cfg, creds, err := api.LoadAuth()
+	if err != nil {
+		return fmt.Errorf("not logged in; run `agentlink login` first: %w", err)
 	}
+	if cfg.CurrentTeam == "" {
+		return errors.New("no active team; run `agentlink team use <team_id>` before init")
+	}
+	if creds.DeviceSession == "" {
+		return errors.New("missing device credential; run `agentlink login` first")
+	}
+	device := cfg.Device
 
 	// Pre-check prerequisites
 	launcher := adapter.NewLauncher(opts.Agent)
@@ -78,48 +69,26 @@ func RunInit(opts *InitOptions) error {
 		}
 	}
 
-	// Register first (network-only, no local side effects) so a failure —
-	// wrong password or unreachable server — leaves nothing behind on disk.
-	regResp, err := registerDeviceInteractive(opts, device)
-	if err != nil {
-		return fmt.Errorf("registration failed: %w", err)
-	}
-
 	// Create directories
 	agentlinkDir := filepath.Join(os.Getenv("HOME"), ".agentlink")
 	if err := os.MkdirAll(agentlinkDir, 0755); err != nil {
 		return fmt.Errorf("cannot create %s: %w", agentlinkDir, err)
 	}
 
-	teamDirs := []string{
-		filepath.Join(absPath, "main"),
-		filepath.Join(absPath, "worker"),
-	}
-	for _, d := range teamDirs {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			return fmt.Errorf("cannot create %s: %w", d, err)
+	for _, session := range sessionNames {
+		if err := os.MkdirAll(filepath.Join(absPath, session), 0755); err != nil {
+			return fmt.Errorf("cannot create %s: %w", filepath.Join(absPath, session), err)
 		}
 	}
 
-	// Write config.toml (initial; [sessions] added after tmux launch records ids)
-	configPath := filepath.Join(agentlinkDir, "config.toml")
-	if err := api.WriteConfigTOML(configPath, opts.Server, device, absPath, opts.Agent, opts.NoPoll, nil); err != nil {
+	// Write config.toml preserving account/team identity; [sessions] is added
+	// after the tmux launch records ids. The device credential is left as-is.
+	if err := writeInitConfig(cfg, absPath, opts, nil); err != nil {
 		return fmt.Errorf("cannot write config: %w", err)
 	}
 
-	// Write credentials.json
-	credPath := filepath.Join(agentlinkDir, "credentials.json")
-	cred := map[string]string{
-		"api_key":       regResp.APIKey,
-		"registered_at": regResp.RegisteredAt,
-	}
-	credData, _ := json.MarshalIndent(cred, "", "  ")
-	if err := os.WriteFile(credPath, credData, 0600); err != nil {
-		return fmt.Errorf("cannot write credentials: %w", err)
-	}
-
 	// Write .agentlink.toml and CLAUDE.md for each session
-	for _, session := range regResp.Sessions {
+	for _, session := range sessionNames {
 		sessionDir := filepath.Join(absPath, session)
 		tomlPath := filepath.Join(sessionDir, ".agentlink.toml")
 		if err := api.WriteSessionTOML(tomlPath, session, device); err != nil {
@@ -132,7 +101,7 @@ func RunInit(opts *InitOptions) error {
 	}
 
 	// Launch tmux sessions and record Claude session_ids
-	sessions, err := launchSessions(absPath, opts.Agent, launchOpts{
+	sessions, err := launchSessionsFn(absPath, opts.Agent, launchOpts{
 		Resume:   false,
 		NoPoll:   opts.NoPoll,
 		Existing: nil,
@@ -142,13 +111,13 @@ func RunInit(opts *InitOptions) error {
 	}
 
 	// Rewrite config.toml with [sessions] segment
-	if err := api.WriteConfigTOML(configPath, opts.Server, device, absPath, opts.Agent, opts.NoPoll, sessions); err != nil {
+	if err := writeInitConfig(cfg, absPath, opts, sessions); err != nil {
 		return fmt.Errorf("cannot rewrite config with session ids: %w", err)
 	}
 
 	// Print success
 	fmt.Printf("✓ Agent team initialized at %s\n", absPath)
-	fmt.Printf("✓ Device %q registered (sessions: %s)\n", device, strings.Join(regResp.Sessions, ", "))
+	fmt.Printf("✓ Using account %q on device %q (team %s)\n", cfg.Username, device, cfg.CurrentTeam)
 	fmt.Println("✓ tmux sessions created: main, worker")
 	if opts.NoPoll {
 		fmt.Println("  Auto-polling disabled (use agentlink poll to start manually)")
@@ -160,6 +129,22 @@ func RunInit(opts *InitOptions) error {
 	fmt.Println("  agentlink attach worker    # switch to worker session")
 
 	return nil
+}
+
+// writeInitConfig persists the config.toml, keeping the logged-in account and
+// active team while updating only the local runtime fields (base dir, agent,
+// poll, sessions).
+func writeInitConfig(cfg *api.AgentConfig, baseDir string, opts *InitOptions, sessions map[string]string) error {
+	out := *cfg
+	out.BaseDir = baseDir
+	out.Agent = opts.Agent
+	interval := cfg.Poll.Interval
+	if interval <= 0 {
+		interval = api.DefaultPollInterval
+	}
+	out.Poll = api.PollConfig{Enabled: !opts.NoPoll, Interval: interval}
+	out.Sessions = sessions
+	return api.WriteAccountConfig(api.ConfigFilePath(), out)
 }
 
 // launchOpts controls how launchSessions starts each tmux session.
@@ -265,59 +250,4 @@ func readClaudeSessionID() (string, error) {
 		return "", err
 	}
 	return doc.LastSessionID, nil
-}
-
-// registerDeviceInteractive registers the device. When running interactively
-// and the server rejects the password (401), it re-prompts for the password
-// and retries, up to two additional attempts, instead of aborting.
-func registerDeviceInteractive(opts *InitOptions, device string) (*registerResponse, error) {
-	for attempt := 0; ; attempt++ {
-		regResp, status, err := registerDevice(opts.Server, device, opts.Password)
-		if err == nil {
-			return regResp, nil
-		}
-		if opts.Interactive && status == http.StatusUnauthorized && attempt < 2 {
-			fmt.Printf("  %v\n", err)
-			opts.Password = promptSecret("请重新输入注册密码")
-			continue
-		}
-		return nil, err
-	}
-}
-
-// registerDevice POSTs to /agents/register. It returns the HTTP status code
-// alongside the error (0 on transport failure) so callers can distinguish a
-// wrong password (401) from other failures.
-func registerDevice(server, device, password string) (*registerResponse, int, error) {
-	body := registerRequest{
-		Device:           device,
-		Sessions:         []string{"main", "worker"},
-		RegisterPassword: password,
-	}
-	data, _ := json.Marshal(body)
-
-	url := server + "/agents/register"
-	resp, err := http.Post(url, "application/json", bytes.NewReader(data))
-	if err != nil {
-		return nil, 0, fmt.Errorf("cannot connect to server %s: %w", server, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
-			return nil, resp.StatusCode, fmt.Errorf("server returned %d: %s", resp.StatusCode, errResp.Error)
-		}
-		return nil, resp.StatusCode, fmt.Errorf("server returned %d", resp.StatusCode)
-	}
-
-	var regResp registerResponse
-	if err := json.Unmarshal(respBody, &regResp); err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("invalid server response: %w", err)
-	}
-	return &regResp, resp.StatusCode, nil
 }

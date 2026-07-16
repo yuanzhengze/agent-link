@@ -189,12 +189,9 @@ func runTeamCmd(err error) {
 
 func cmdInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	server := fs.String("server", "", "API server URL")
-	password := fs.String("password", "", "Registration password")
-	device := fs.String("device", "", "Device name (default: hostname)")
 	agent := fs.String("agent", "claude", "Agent type (default: claude)")
 	noPoll := fs.Bool("no-poll", false, "Disable auto-polling (default: false)")
-	force := fs.Bool("force", false, "Force re-register if device exists (default: false)")
+	force := fs.Bool("force", false, "Overwrite an existing workspace directory (default: false)")
 	fs.Parse(args)
 
 	path := fs.Arg(0)
@@ -203,36 +200,10 @@ func cmdInit(args []string) {
 	}
 
 	opts := &rt.InitOptions{
-		Server:   *server,
-		Password: *password,
-		Device:   *device,
-		Path:     path,
-		Agent:    *agent,
-		NoPoll:   *noPoll,
-		Force:    *force,
-	}
-
-	// When a required field is missing, run the interactive wizard on a
-	// terminal; otherwise keep the original hard error (so piped stdin in
-	// CI/scripts fails fast instead of hanging).
-	if opts.Server == "" || opts.Password == "" {
-		if rt.IsInteractive() {
-			opts.Interactive = true
-			if err := rt.PromptInitOptions(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				os.Exit(1)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "init: --server and --password are required")
-			os.Exit(1)
-		}
-	}
-
-	// In interactive mode, show a summary and let the user back out before
-	// anything is created or registered.
-	if opts.Interactive && !rt.ConfirmInitSummary(opts) {
-		fmt.Fprintln(os.Stderr, "已取消")
-		os.Exit(1)
+		Path:   path,
+		Agent:  *agent,
+		NoPoll: *noPoll,
+		Force:  *force,
 	}
 
 	if err := rt.RunInit(opts); err != nil {
