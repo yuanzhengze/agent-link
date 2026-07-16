@@ -572,6 +572,18 @@ transitional `GET /preview/teams/{team_id}/{project_id}/{path...}` to the
 canonical `GET /preview/{team_id}/{project_id}/{path...}` and update the Web GUI
 `previewFrame.src` (drop the `teams/` segment).
 
+> **Deferred hardening (decided 2026-07-16): preview origin isolation.** The v2
+> preview is served same-origin as the app and renders member-authored HTML, so
+> a member's stored `<script>` runs on the app origin and can read the readable
+> `al_csrf` and act as a viewing member (in-team privilege escalation). Accepted
+> for now (≈10 trusted members, attributable authorship); mitigated only with
+> `X-Content-Type-Options: nosniff`. Real fix (schedule here or in Plan 3): serve
+> preview from a separate origin/subdomain so the preview page cannot read app
+> cookies or make same-origin authenticated requests; give preview its own
+> read-only, revocable, short-lived auth (separate-scope cookie or preview token),
+> optionally with `<iframe sandbox>` + CSP. This changes cookie scoping and the
+> preview auth path, so it is its own task, not a drive-by edit during cutover.
+
 `config.Config` becomes:
 
 ```go
