@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -61,15 +62,18 @@ func (s *Server) loadTeamProject(ctx context.Context, teamID, projectID string) 
 		CreatedAt:  fields["created_at"],
 		HeadCommit: fields["head_commit"],
 	}
-	if err := validateStoredTeamProject(project, projectID); err != nil {
+	if err := validateStoredTeamProject(project, projectID, fields["creation_token"]); err != nil {
 		return TeamProject{}, fmt.Errorf("load project %q: %w: %v", projectID, errProjectStoreInconsistent, err)
 	}
 	return project, nil
 }
 
-func validateStoredTeamProject(project TeamProject, projectID string) error {
+func validateStoredTeamProject(project TeamProject, projectID, creationToken string) error {
 	if project.ID != projectID || !validProjectIDV2(project.ID) {
 		return errors.New("invalid id")
+	}
+	if !validProjectCreationTokenV2(creationToken) {
+		return errors.New("invalid creation_token")
 	}
 	name, err := validateProjectNameV2(project.Name)
 	if err != nil || name != project.Name {
@@ -82,6 +86,22 @@ func validateStoredTeamProject(project TeamProject, projectID string) error {
 		return errors.New("invalid head_commit")
 	}
 	return nil
+}
+
+func generateProjectCreationTokenV2() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate project creation token: %w", err)
+	}
+	return hex.EncodeToString(value), nil
+}
+
+func validProjectCreationTokenV2(token string) bool {
+	if len(token) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(token)
+	return err == nil
 }
 
 func validProjectIDV2(id string) bool {

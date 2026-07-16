@@ -41,6 +41,17 @@ if index_exists == 0 and index_type ~= 'none' then
   return redis.error_reply('ERR team projects key has inconsistent existence')
 end
 if project_exists == 1 then
+  local existing = redis.call('HMGET', KEYS[1],
+    'id', 'team_id', 'name', 'created_at', 'head_commit', 'creation_token')
+  if existing[1] == ARGV[1]
+    and existing[2] == ARGV[2]
+    and existing[3] == ARGV[3]
+    and existing[4] == ARGV[4]
+    and existing[5] == ARGV[5]
+    and existing[6] == ARGV[6] then
+    redis.call('SADD', KEYS[2], ARGV[1])
+    return 2
+  end
   return 0
 end
 
@@ -49,8 +60,47 @@ redis.call('HSET', KEYS[1],
   'team_id', ARGV[2],
   'name', ARGV[3],
   'created_at', ARGV[4],
-  'head_commit', ARGV[5])
+  'head_commit', ARGV[5],
+  'creation_token', ARGV[6])
 redis.call('SADD', KEYS[2], ARGV[1])
+return 1
+`)
+
+var verifyTeamProjectV2Script = goredis.NewScript(`
+local project_type = redis.call('TYPE', KEYS[1]).ok
+local index_type = redis.call('TYPE', KEYS[2]).ok
+
+if project_type == 'none' then
+  return 0
+end
+if project_type ~= 'hash' then
+  return 4
+end
+
+local existing = redis.call('HMGET', KEYS[1],
+  'id', 'team_id', 'name', 'created_at', 'head_commit', 'creation_token')
+local existing_token = existing[6]
+if not existing_token
+  or string.len(existing_token) ~= 32
+  or not string.match(existing_token, '^[0-9a-fA-F]+$') then
+  return 4
+end
+if existing_token ~= ARGV[6] then
+  return 2
+end
+if existing[1] ~= ARGV[1]
+  or existing[2] ~= ARGV[2]
+  or existing[3] ~= ARGV[3]
+  or existing[4] ~= ARGV[4]
+  or existing[5] ~= ARGV[5] then
+  return 4
+end
+if index_type ~= 'set' then
+  return 3
+end
+if redis.call('SISMEMBER', KEYS[2], ARGV[1]) ~= 1 then
+  return 3
+end
 return 1
 `)
 
@@ -69,6 +119,16 @@ const (
 	projectPersistenceAbsent
 	projectPersistenceMatches
 	projectPersistenceConflicts
+	projectPersistenceBrokenIndex
+	projectPersistenceCorrupt
+)
+
+type projectPersistenceSettlement int
+
+const (
+	projectPersistenceUnresolved projectPersistenceSettlement = iota
+	projectPersistenceSettled
+	projectPersistenceCollision
 )
 
 func (s *Server) handleCreateProjectV2(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +193,10 @@ func (s *Server) createTeamProjectV2(ctx context.Context, teamID, name string) (
 	if idGenerator == nil {
 		idGenerator = generateID
 	}
+	tokenGenerator := s.projectTokenGenerator
+	if tokenGenerator == nil {
+		tokenGenerator = generateProjectCreationTokenV2
+	}
 	initializer := s.projectGitInitializer
 	if initializer == nil {
 		initializer = initializeProjectGitV2
@@ -142,6 +206,13 @@ func (s *Server) createTeamProjectV2(ctx context.Context, teamID, name string) (
 		projectID := idGenerator()
 		if !validProjectIDV2(projectID) {
 			return TeamProject{}, fmt.Errorf("generate project id: %w", errProjectStoreInconsistent)
+		}
+		creationToken, err := tokenGenerator()
+		if err != nil {
+			return TeamProject{}, fmt.Errorf("generate project creation token: %w", err)
+		}
+		if !validProjectCreationTokenV2(creationToken) {
+			return TeamProject{}, fmt.Errorf("generate project creation token: %w", errProjectStoreInconsistent)
 		}
 
 		dir := s.projectDirV2(teamID, projectID)
@@ -169,7 +240,7 @@ func (s *Server) createTeamProjectV2(ctx context.Context, teamID, name string) (
 			CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			HeadCommit: headCommit,
 		}
-		err = s.persistTeamProjectV2(ctx, project)
+		err = s.persistTeamProjectV2(ctx, project, creationToken)
 		switch {
 		case err == nil:
 			return project, nil
@@ -177,17 +248,19 @@ func (s *Server) createTeamProjectV2(ctx context.Context, teamID, name string) (
 			removeReservedProjectDirV2(dir)
 			continue
 		case projectPersistenceMayBeUncertain(err):
-			verification := s.verifyTeamProjectPersistenceV2(project)
-			switch verification {
-			case projectPersistenceMatches:
+			settlement, settlementErr := s.settleTeamProjectPersistenceV2(project, creationToken)
+			switch settlement {
+			case projectPersistenceSettled:
 				return project, nil
-			case projectPersistenceAbsent:
+			case projectPersistenceCollision:
 				removeReservedProjectDirV2(dir)
-			case projectPersistenceUnknown, projectPersistenceConflicts:
-				// The hash may refer to this work tree. Preserve the directory
-				// rather than risk metadata pointing at a missing tree.
+				continue
+			case projectPersistenceUnresolved:
+				if settlementErr != nil {
+					return TeamProject{}, settlementErr
+				}
+				return TeamProject{}, err
 			}
-			return TeamProject{}, err
 		default:
 			removeReservedProjectDirV2(dir)
 			return TeamProject{}, err
@@ -267,7 +340,7 @@ func initializeProjectGitV2(dir string) (string, error) {
 	return headCommit, nil
 }
 
-func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject) error {
+func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject, creationToken string) error {
 	result, err := createTeamProjectV2Script.Run(
 		ctx,
 		s.rdb,
@@ -277,12 +350,13 @@ func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject) 
 		project.Name,
 		project.CreatedAt,
 		project.HeadCommit,
+		creationToken,
 	).Int64()
 	if err != nil {
 		return fmt.Errorf("%w: persist project: %w", errProjectStoreInconsistent, err)
 	}
 	switch result {
-	case 1:
+	case 1, 2:
 		return nil
 	case 0:
 		return errProjectIDCollision
@@ -296,33 +370,97 @@ func projectPersistenceMayBeUncertain(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-func (s *Server) verifyTeamProjectPersistenceV2(project TeamProject) projectPersistenceVerification {
+func (s *Server) settleTeamProjectPersistenceV2(
+	project TeamProject,
+	creationToken string,
+) (projectPersistenceSettlement, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), projectV2VerifyTimeout)
+	err := s.persistTeamProjectV2(ctx, project, creationToken)
+	cancel()
+
+	switch {
+	case err == nil:
+		return projectPersistenceSettled, nil
+	case errors.Is(err, errProjectIDCollision):
+		return projectPersistenceCollision, nil
+	case !projectPersistenceMayBeUncertain(err):
+		return projectPersistenceUnresolved, err
+	}
+
+	verification, verifyErr := s.verifyTeamProjectPersistenceV2(project, creationToken)
+	if verifyErr != nil {
+		return projectPersistenceUnresolved, verifyErr
+	}
+	switch verification {
+	case projectPersistenceMatches:
+		return projectPersistenceSettled, nil
+	case projectPersistenceConflicts:
+		return projectPersistenceCollision, nil
+	case projectPersistenceAbsent:
+		return projectPersistenceUnresolved, fmt.Errorf(
+			"%w: project absent after uncertain persistence",
+			errProjectStoreInconsistent,
+		)
+	case projectPersistenceBrokenIndex:
+		return projectPersistenceUnresolved, fmt.Errorf(
+			"%w: matching project has a missing or invalid team index",
+			errProjectStoreInconsistent,
+		)
+	case projectPersistenceCorrupt:
+		return projectPersistenceUnresolved, fmt.Errorf(
+			"%w: project metadata is missing or corrupt",
+			errProjectStoreInconsistent,
+		)
+	default:
+		return projectPersistenceUnresolved, fmt.Errorf(
+			"%w: unknown project persistence state",
+			errProjectStoreInconsistent,
+		)
+	}
+}
+
+func (s *Server) verifyTeamProjectPersistenceV2(
+	project TeamProject,
+	creationToken string,
+) (projectPersistenceVerification, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), projectV2VerifyTimeout)
 	defer cancel()
 
-	key := projectV2Key(project.ID)
-	keyType, err := s.rdb.Type(ctx, key).Result()
+	result, err := verifyTeamProjectV2Script.Run(
+		ctx,
+		s.rdb,
+		[]string{projectV2Key(project.ID), teamProjectsV2Key(project.TeamID)},
+		project.ID,
+		project.TeamID,
+		project.Name,
+		project.CreatedAt,
+		project.HeadCommit,
+		creationToken,
+	).Int64()
 	if err != nil {
-		return projectPersistenceUnknown
+		return projectPersistenceUnknown, fmt.Errorf(
+			"%w: verify project persistence: %w",
+			errProjectStoreInconsistent,
+			err,
+		)
 	}
-	switch keyType {
-	case "none":
-		return projectPersistenceAbsent
-	case "hash":
-		fields, err := s.rdb.HGetAll(ctx, key).Result()
-		if err != nil {
-			return projectPersistenceUnknown
-		}
-		if fields["id"] == project.ID &&
-			fields["team_id"] == project.TeamID &&
-			fields["name"] == project.Name &&
-			fields["created_at"] == project.CreatedAt &&
-			fields["head_commit"] == project.HeadCommit {
-			return projectPersistenceMatches
-		}
-		return projectPersistenceConflicts
+	switch result {
+	case 0:
+		return projectPersistenceAbsent, nil
+	case 1:
+		return projectPersistenceMatches, nil
+	case 2:
+		return projectPersistenceConflicts, nil
+	case 3:
+		return projectPersistenceBrokenIndex, nil
+	case 4:
+		return projectPersistenceCorrupt, nil
 	default:
-		return projectPersistenceAbsent
+		return projectPersistenceUnknown, fmt.Errorf(
+			"%w: unexpected project verification result %d",
+			errProjectStoreInconsistent,
+			result,
+		)
 	}
 }
 

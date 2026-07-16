@@ -45,6 +45,7 @@ type Server struct {
 	cookieSecure          bool
 	publicOrigin          string
 	projectIDGenerator    func() string
+	projectTokenGenerator func() (string, error)
 	projectGitInitializer func(string) (string, error)
 }
 
@@ -111,6 +112,7 @@ func NewWithOptions(opts ServerOptions) *Server {
 		cookieSecure:          opts.CookieSecure,
 		publicOrigin:          publicOrigin,
 		projectIDGenerator:    generateID,
+		projectTokenGenerator: generateProjectCreationTokenV2,
 		projectGitInitializer: initializeProjectGitV2,
 	}
 

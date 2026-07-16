@@ -171,7 +171,17 @@ func rawProjectV2CookieRequest(
 
 func writeStoredProjectV2(t *testing.T, project projectV2TestView) {
 	t.Helper()
-	if err := authV2Rdb.HSet(
+	writeStoredProjectV2To(t, authV2Rdb.Client, project, project.ID)
+}
+
+func writeStoredProjectV2To(
+	t *testing.T,
+	rdb *goredis.Client,
+	project projectV2TestView,
+	creationToken string,
+) {
+	t.Helper()
+	if err := rdb.HSet(
 		context.Background(),
 		projectV2Key(project.ID),
 		"id", project.ID,
@@ -179,9 +189,28 @@ func writeStoredProjectV2(t *testing.T, project projectV2TestView) {
 		"name", project.Name,
 		"created_at", project.CreatedAt,
 		"head_commit", project.HeadCommit,
+		"creation_token", creationToken,
 	).Err(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func runCreateProjectV2ScriptForTest(
+	ctx context.Context,
+	project projectV2TestView,
+	creationToken string,
+) (int64, error) {
+	return createTeamProjectV2Script.Run(
+		ctx,
+		authV2Rdb,
+		[]string{projectV2Key(project.ID), teamProjectsV2Key(project.TeamID)},
+		project.ID,
+		project.TeamID,
+		project.Name,
+		project.CreatedAt,
+		project.HeadCommit,
+		creationToken,
+	).Int64()
 }
 
 func assertProjectV2NotPersisted(t *testing.T, teamID, projectID string) {
@@ -206,9 +235,109 @@ func assertProjectV2NotPersisted(t *testing.T, teamID, projectID string) {
 	}
 }
 
+func TestV2ProjectPersistReplayUsesCreationToken(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	project := projectV2TestView{
+		ID:         projectV2TestID(91),
+		TeamID:     "tm_project_replay",
+		Name:       "Replay project",
+		CreatedAt:  "2026-07-16T05:00:00Z",
+		HeadCommit: strings.Repeat("9", 40),
+	}
+	creationToken := strings.Repeat("a", 32)
+	dir := authV2Srv.projectDirV2(project.TeamID, project.ID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "marker")
+	if err := os.WriteFile(marker, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := runCreateProjectV2ScriptForTest(context.Background(), project, creationToken)
+	if err != nil || first != 1 {
+		t.Fatalf("first persist = %d, %v; want created result 1", first, err)
+	}
+	if err := authV2Rdb.SRem(
+		context.Background(),
+		teamProjectsV2Key(project.TeamID),
+		project.ID,
+	).Err(); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := runCreateProjectV2ScriptForTest(context.Background(), project, creationToken)
+	if err != nil || replay != 2 {
+		t.Fatalf("same-token replay = %d, %v; want idempotent result 2", replay, err)
+	}
+
+	originalFields, err := authV2Rdb.HGetAll(context.Background(), projectV2Key(project.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if originalFields["creation_token"] != creationToken {
+		t.Fatalf("stored creation_token = %q; want %q", originalFields["creation_token"], creationToken)
+	}
+	if indexed, err := authV2Rdb.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(project.TeamID),
+		project.ID,
+	).Result(); err != nil || !indexed {
+		t.Fatalf("replayed project indexed=%v err=%v; want true", indexed, err)
+	}
+
+	differentToken, err := runCreateProjectV2ScriptForTest(
+		context.Background(),
+		project,
+		strings.Repeat("b", 32),
+	)
+	if err != nil || differentToken != 0 {
+		t.Fatalf("different-token persist = %d, %v; want collision 0", differentToken, err)
+	}
+	differentPayload := project
+	differentPayload.Name = "Changed payload"
+	sameTokenDifferentPayload, err := runCreateProjectV2ScriptForTest(
+		context.Background(),
+		differentPayload,
+		creationToken,
+	)
+	if err != nil || sameTokenDifferentPayload != 0 {
+		t.Fatalf("different-payload persist = %d, %v; want collision 0", sameTokenDifferentPayload, err)
+	}
+
+	afterFields, err := authV2Rdb.HGetAll(context.Background(), projectV2Key(project.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterFields, originalFields) {
+		t.Fatalf("collision/replay changed metadata: got %v want %v", afterFields, originalFields)
+	}
+	if body, err := os.ReadFile(marker); err != nil || string(body) != "original" {
+		t.Fatalf("collision/replay changed worktree: body=%q err=%v", body, err)
+	}
+}
+
+type projectV2CreateScriptFault int
+
+const (
+	projectV2CreateScriptPass projectV2CreateScriptFault = iota
+	projectV2CreateScriptFailBefore
+	projectV2CreateScriptFailAfter
+)
+
+type projectV2CreateScriptStep struct {
+	fault projectV2CreateScriptFault
+	after func()
+}
+
 type projectV2UncertainResultHook struct {
-	failVerification bool
-	injected         atomic.Bool
+	mu                 sync.Mutex
+	createSteps        []projectV2CreateScriptStep
+	createCalls        int
+	capturedCreateArgs [][]any
+	failVerification   bool
+	injected           atomic.Bool
 }
 
 func (h *projectV2UncertainResultHook) DialHook(next goredis.DialHook) goredis.DialHook {
@@ -219,15 +348,49 @@ func (h *projectV2UncertainResultHook) DialHook(next goredis.DialHook) goredis.D
 
 func (h *projectV2UncertainResultHook) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
 	return func(ctx context.Context, cmd goredis.Cmder) error {
-		if h.failVerification && h.injected.Load() && cmd.Name() == "type" {
+		args := cmd.Args()
+		isCreateScript := cmd.Name() == "evalsha" &&
+			len(args) > 1 &&
+			fmt.Sprint(args[1]) == createTeamProjectV2Script.Hash()
+		if isCreateScript {
+			h.mu.Lock()
+			call := h.createCalls
+			h.createCalls++
+			h.capturedCreateArgs = append(h.capturedCreateArgs, append([]any(nil), args...))
+			step := projectV2CreateScriptStep{}
+			if call < len(h.createSteps) {
+				step = h.createSteps[call]
+			}
+			h.mu.Unlock()
+
+			if step.fault == projectV2CreateScriptFailBefore {
+				h.injected.Store(true)
+				if step.after != nil {
+					step.after()
+				}
+				return io.ErrUnexpectedEOF
+			}
+			err := next(ctx, cmd)
+			if err != nil {
+				return err
+			}
+			if step.after != nil {
+				step.after()
+			}
+			if step.fault == projectV2CreateScriptFailAfter {
+				h.injected.Store(true)
+				return io.ErrUnexpectedEOF
+			}
+			return nil
+		}
+
+		if h.failVerification &&
+			(cmd.Name() == "eval" || cmd.Name() == "evalsha") &&
+			h.createCallCount() >= 2 {
+			h.injected.Store(true)
 			return io.ErrUnexpectedEOF
 		}
-		err := next(ctx, cmd)
-		if err == nil && (cmd.Name() == "eval" || cmd.Name() == "evalsha") &&
-			h.injected.CompareAndSwap(false, true) {
-			return io.ErrUnexpectedEOF
-		}
-		return err
+		return next(ctx, cmd)
 	}
 }
 
@@ -237,7 +400,39 @@ func (h *projectV2UncertainResultHook) ProcessPipelineHook(next goredis.ProcessP
 	}
 }
 
-func newProjectV2HookedStore(t *testing.T, hook goredis.Hook) (*Server, *goredis.Client) {
+func (h *projectV2UncertainResultHook) createCallCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.createCalls
+}
+
+func (h *projectV2UncertainResultHook) capturedProject(
+	t *testing.T,
+	call int,
+) (projectV2TestView, string) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if call < 0 || call >= len(h.capturedCreateArgs) {
+		t.Fatalf("captured create call %d missing", call)
+	}
+	args := h.capturedCreateArgs[call]
+	if len(args) < 11 {
+		t.Fatalf("captured create args = %v; want script keys and six fields", args)
+	}
+	return projectV2TestView{
+		ID:         fmt.Sprint(args[5]),
+		TeamID:     fmt.Sprint(args[6]),
+		Name:       fmt.Sprint(args[7]),
+		CreatedAt:  fmt.Sprint(args[8]),
+		HeadCommit: fmt.Sprint(args[9]),
+	}, fmt.Sprint(args[10])
+}
+
+func newProjectV2HookedStore(
+	t *testing.T,
+	hook goredis.Hook,
+) (*Server, *goredis.Client, *goredis.Client) {
 	t.Helper()
 	raw := goredis.NewClient(&goredis.Options{Addr: "localhost:6379", DB: 15})
 	if err := raw.Ping(context.Background()).Err(); err != nil {
@@ -248,9 +443,13 @@ func newProjectV2HookedStore(t *testing.T, hook goredis.Hook) (*Server, *goredis
 		raw.Close()
 		t.Fatal(err)
 	}
+	if err := createTeamProjectV2Script.Load(context.Background(), raw).Err(); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
 	raw.AddHook(hook)
+	inspector := goredis.NewClient(&goredis.Options{Addr: "localhost:6379", DB: 15})
 	t.Cleanup(func() {
-		inspector := goredis.NewClient(&goredis.Options{Addr: "localhost:6379", DB: 15})
 		_ = inspector.FlushDB(context.Background()).Err()
 		_ = inspector.Close()
 		_ = raw.Close()
@@ -259,7 +458,7 @@ func newProjectV2HookedStore(t *testing.T, hook goredis.Hook) (*Server, *goredis
 		rdb:                   &redisclient.Client{Client: raw},
 		dataDir:               t.TempDir(),
 		projectGitInitializer: fakeProjectGitV2,
-	}, raw
+	}, raw, inspector
 }
 
 func TestV2ProjectCreateAndListAreTeamScoped(t *testing.T) {
@@ -296,6 +495,9 @@ func TestV2ProjectCreateAndListAreTeamScoped(t *testing.T) {
 	if stored["id"] != created.ID || stored["team_id"] != teamID || stored["name"] != created.Name ||
 		stored["created_at"] != created.CreatedAt || stored["head_commit"] != created.HeadCommit {
 		t.Fatalf("stored project = %v; want response fields", stored)
+	}
+	if !validProjectCreationTokenV2(stored["creation_token"]) {
+		t.Fatalf("stored creation_token = %q; want 128-bit lowercase hex", stored["creation_token"])
 	}
 	indexed, err := authV2Rdb.SIsMember(context.Background(), "agentlink:v2:team:"+teamID+":projects", created.ID).Result()
 	if err != nil {
@@ -897,7 +1099,7 @@ func TestV2ProjectFiveIDCollisionsLeaveNoNewState(t *testing.T) {
 	}
 }
 
-func TestV2ProjectCanceledPersistenceUsesFreshVerificationAndCleansAbsentTree(t *testing.T) {
+func TestV2ProjectCanceledInitialPersistenceUsesFreshSettlement(t *testing.T) {
 	setupAuthV2TestServer(t)
 	cleanupAuthV2Keys(t)
 
@@ -911,21 +1113,37 @@ func TestV2ProjectCanceledPersistenceUsesFreshVerificationAndCleansAbsentTree(t 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := srv.createTeamProjectV2(ctx, teamID, "Canceled project"); err == nil {
-		t.Fatal("canceled persistence expected an error")
+	project, err := srv.createTeamProjectV2(ctx, teamID, "Canceled project")
+	if err != nil {
+		t.Fatalf("fresh settlement should recover canceled initial persistence: %v", err)
 	}
-	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("fresh verification confirmed absence but directory remains: %v", err)
+	if project.ID != projectID {
+		t.Fatalf("settled project id = %q; want %q", project.ID, projectID)
 	}
-	exists, err := authV2Rdb.Exists(context.Background(), projectV2Key(projectID)).Result()
-	if err != nil || exists != 0 {
-		t.Fatalf("canceled project metadata exists=%d err=%v; want absent", exists, err)
+	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+		t.Fatalf("settled project tree missing: %v", err)
+	}
+	fields, err := authV2Rdb.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil || fields["id"] != projectID || !validProjectCreationTokenV2(fields["creation_token"]) {
+		t.Fatalf("settled project metadata = %v err=%v", fields, err)
+	}
+	indexed, err := authV2Rdb.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(teamID),
+		projectID,
+	).Result()
+	if err != nil || !indexed {
+		t.Fatalf("settled project indexed=%v err=%v; want true", indexed, err)
 	}
 }
 
-func TestV2ProjectUncertainRedisResultKeepsMatchingPersistedTree(t *testing.T) {
-	hook := &projectV2UncertainResultHook{}
-	srv, _ := newProjectV2HookedStore(t, hook)
+func TestV2ProjectLostCreateReplySettlesIdempotently(t *testing.T) {
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{fault: projectV2CreateScriptFailAfter},
+		},
+	}
+	srv, _, inspector := newProjectV2HookedStore(t, hook)
 	teamID := "tm_project_uncertain_match"
 	projectID := projectV2TestID(552)
 	srv.projectIDGenerator = func() string { return projectID }
@@ -940,36 +1158,357 @@ func TestV2ProjectUncertainRedisResultKeepsMatchingPersistedTree(t *testing.T) {
 	if project.ID != projectID {
 		t.Fatalf("recovered project id = %q; want %q", project.ID, projectID)
 	}
+	if calls := hook.createCallCount(); calls != 2 {
+		t.Fatalf("create script calls = %d; want initial write plus idempotent settlement", calls)
+	}
+	initialProject, initialToken := hook.capturedProject(t, 0)
+	settledProject, settledToken := hook.capturedProject(t, 1)
+	if initialProject != settledProject || initialToken != settledToken {
+		t.Fatalf(
+			"settlement changed request: initial=%+v token=%q settled=%+v token=%q",
+			initialProject,
+			initialToken,
+			settledProject,
+			settledToken,
+		)
+	}
 	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
 		t.Fatalf("matching persisted project tree was removed: %v", err)
+	}
+	fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil || fields["id"] != projectID || fields["team_id"] != teamID {
+		t.Fatalf("persisted metadata = %v err=%v", fields, err)
+	}
+	indexed, err := inspector.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(teamID),
+		projectID,
+	).Result()
+	if err != nil || !indexed {
+		t.Fatalf("persisted index membership=%v err=%v; want true", indexed, err)
+	}
+}
+
+func TestV2ProjectLostSettlementReplyUsesAtomicVerification(t *testing.T) {
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{fault: projectV2CreateScriptFailAfter},
+			{fault: projectV2CreateScriptFailAfter},
+		},
+	}
+	srv, _, inspector := newProjectV2HookedStore(t, hook)
+	teamID := "tm_project_uncertain_verify_match"
+	projectID := projectV2TestID(553)
+	srv.projectIDGenerator = func() string { return projectID }
+
+	project, err := srv.createTeamProjectV2(context.Background(), teamID, "Verified persisted")
+	if err != nil {
+		t.Fatalf("atomic verification should recover matching project: %v", err)
+	}
+	if project.ID != projectID || hook.createCallCount() != 2 {
+		t.Fatalf("verified project=%+v create calls=%d", project, hook.createCallCount())
+	}
+	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+		t.Fatalf("verified project tree missing: %v", err)
+	}
+	indexed, err := inspector.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(teamID),
+		projectID,
+	).Result()
+	if err != nil || !indexed {
+		t.Fatalf("verified project indexed=%v err=%v; want true", indexed, err)
 	}
 }
 
 func TestV2ProjectUnverifiableRedisResultLeavesTree(t *testing.T) {
-	hook := &projectV2UncertainResultHook{failVerification: true}
-	srv, _ := newProjectV2HookedStore(t, hook)
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{fault: projectV2CreateScriptFailAfter},
+			{fault: projectV2CreateScriptFailAfter},
+		},
+		failVerification: true,
+	}
+	srv, _, inspector := newProjectV2HookedStore(t, hook)
 	teamID := "tm_project_uncertain_unknown"
-	projectID := projectV2TestID(553)
+	projectID := projectV2TestID(554)
 	srv.projectIDGenerator = func() string { return projectID }
 
-	if _, err := srv.createTeamProjectV2(context.Background(), teamID, "Unverifiable persisted"); err == nil {
-		t.Fatal("unverifiable Redis result expected an error")
+	if _, err := srv.createTeamProjectV2(
+		context.Background(),
+		teamID,
+		"Unverifiable persisted",
+	); !errors.Is(err, errProjectStoreInconsistent) {
+		t.Fatalf("unverifiable Redis result error = %v; want store error", err)
 	}
 	if !hook.injected.Load() {
 		t.Fatal("test hook did not inject an uncertain Redis result")
+	}
+	if calls := hook.createCallCount(); calls != 2 {
+		t.Fatalf("create script calls = %d; want initial and settlement", calls)
 	}
 	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
 		t.Fatalf("unverifiable project tree must be preserved: %v", err)
 	}
 
-	inspector := goredis.NewClient(&goredis.Options{Addr: "localhost:6379", DB: 15})
-	defer inspector.Close()
 	fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if fields["team_id"] != teamID {
 		t.Fatalf("persisted metadata = %v; want team %q", fields, teamID)
+	}
+}
+
+func TestV2ProjectUncertainAbsentVerificationPreservesTreeForLateCreate(t *testing.T) {
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{fault: projectV2CreateScriptFailBefore},
+			{fault: projectV2CreateScriptFailBefore},
+		},
+	}
+	srv, raw, inspector := newProjectV2HookedStore(t, hook)
+	teamID := "tm_project_uncertain_absent"
+	projectID := projectV2TestID(555)
+	creationToken := strings.Repeat("1", 32)
+	srv.projectIDGenerator = func() string { return projectID }
+	srv.projectTokenGenerator = func() (string, error) { return creationToken, nil }
+
+	if _, err := srv.createTeamProjectV2(
+		context.Background(),
+		teamID,
+		"Late project",
+	); !errors.Is(err, errProjectStoreInconsistent) {
+		t.Fatalf("absent verification error = %v; want store error", err)
+	}
+	if calls := hook.createCallCount(); calls != 2 {
+		t.Fatalf("create script calls = %d; want uncertain initial and settlement", calls)
+	}
+	dir := srv.projectDirV2(teamID, projectID)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("absent verification must preserve work tree: %v", err)
+	}
+	exists, err := inspector.Exists(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil || exists != 0 {
+		t.Fatalf("project metadata exists=%d err=%v before late command; want absent", exists, err)
+	}
+
+	captured, capturedToken := hook.capturedProject(t, 0)
+	if capturedToken != creationToken {
+		t.Fatalf("captured token = %q; want %q", capturedToken, creationToken)
+	}
+	result, err := createTeamProjectV2Script.Run(
+		context.Background(),
+		raw,
+		[]string{projectV2Key(captured.ID), teamProjectsV2Key(captured.TeamID)},
+		captured.ID,
+		captured.TeamID,
+		captured.Name,
+		captured.CreatedAt,
+		captured.HeadCommit,
+		capturedToken,
+	).Int64()
+	if err != nil || result != 1 {
+		t.Fatalf("late same-token create result=%d err=%v; want 1", result, err)
+	}
+	indexed, err := inspector.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(teamID),
+		projectID,
+	).Result()
+	if err != nil || !indexed {
+		t.Fatalf("late project indexed=%v err=%v; want true", indexed, err)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("late project metadata points to missing tree: %v", err)
+	}
+}
+
+func TestV2ProjectVerifiedForeignTokenCleansOnlyCrossTeamAttemptAndRetries(t *testing.T) {
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{fault: projectV2CreateScriptFailBefore},
+			{fault: projectV2CreateScriptFailBefore},
+		},
+	}
+	srv, _, inspector := newProjectV2HookedStore(t, hook)
+	foreignTeamID := "tm_project_foreign_owner"
+	attemptTeamID := "tm_project_foreign_attempt"
+	collisionID := projectV2TestID(556)
+	successID := projectV2TestID(557)
+	foreignToken := strings.Repeat("2", 32)
+	foreign := projectV2TestView{
+		ID:         collisionID,
+		TeamID:     foreignTeamID,
+		Name:       "Foreign project",
+		CreatedAt:  "2026-07-16T06:00:00Z",
+		HeadCommit: strings.Repeat("b", 40),
+	}
+	writeStoredProjectV2To(t, inspector, foreign, foreignToken)
+	if err := inspector.SAdd(
+		context.Background(),
+		teamProjectsV2Key(foreignTeamID),
+		collisionID,
+	).Err(); err != nil {
+		t.Fatal(err)
+	}
+	foreignDir := srv.projectDirV2(foreignTeamID, collisionID)
+	if err := os.MkdirAll(foreignDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	foreignMarker := filepath.Join(foreignDir, "owner")
+	if err := os.WriteFile(foreignMarker, []byte("foreign"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	originalFields, err := inspector.HGetAll(context.Background(), projectV2Key(collisionID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var idCalls atomic.Int64
+	srv.projectIDGenerator = func() string {
+		if idCalls.Add(1) == 1 {
+			return collisionID
+		}
+		return successID
+	}
+	var tokenCalls atomic.Int64
+	srv.projectTokenGenerator = func() (string, error) {
+		if tokenCalls.Add(1) == 1 {
+			return strings.Repeat("3", 32), nil
+		}
+		return strings.Repeat("4", 32), nil
+	}
+
+	project, err := srv.createTeamProjectV2(context.Background(), attemptTeamID, "Attempt project")
+	if err != nil {
+		t.Fatalf("foreign-token collision should retry: %v", err)
+	}
+	if project.ID != successID || idCalls.Load() != 2 || tokenCalls.Load() != 2 {
+		t.Fatalf(
+			"created=%+v id calls=%d token calls=%d; want second attempt",
+			project,
+			idCalls.Load(),
+			tokenCalls.Load(),
+		)
+	}
+	if _, err := os.Stat(srv.projectDirV2(attemptTeamID, collisionID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cross-team collision attempt tree remains: %v", err)
+	}
+	if body, err := os.ReadFile(foreignMarker); err != nil || string(body) != "foreign" {
+		t.Fatalf("foreign work tree changed: body=%q err=%v", body, err)
+	}
+	afterFields, err := inspector.HGetAll(context.Background(), projectV2Key(collisionID)).Result()
+	if err != nil || !reflect.DeepEqual(afterFields, originalFields) {
+		t.Fatalf("foreign metadata changed: got=%v want=%v err=%v", afterFields, originalFields, err)
+	}
+	foreignIndexed, err := inspector.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(foreignTeamID),
+		collisionID,
+	).Result()
+	if err != nil || !foreignIndexed {
+		t.Fatalf("foreign index membership=%v err=%v; want true", foreignIndexed, err)
+	}
+	attemptIndexed, err := inspector.SIsMember(
+		context.Background(),
+		teamProjectsV2Key(attemptTeamID),
+		collisionID,
+	).Result()
+	if err != nil || attemptIndexed {
+		t.Fatalf("attempt collision indexed=%v err=%v; want false", attemptIndexed, err)
+	}
+	if _, err := os.Stat(srv.projectDirV2(attemptTeamID, successID)); err != nil {
+		t.Fatalf("successful retry tree missing: %v", err)
+	}
+}
+
+func TestV2ProjectMatchingHashWithBrokenIndexPreservesTree(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		mutate func(t *testing.T, inspector *goredis.Client, indexKey string)
+		assert func(t *testing.T, inspector *goredis.Client, indexKey string)
+	}{
+		{
+			name: "missing index",
+			mutate: func(t *testing.T, inspector *goredis.Client, indexKey string) {
+				t.Helper()
+				if err := inspector.Del(context.Background(), indexKey).Err(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			assert: func(t *testing.T, inspector *goredis.Client, indexKey string) {
+				t.Helper()
+				exists, err := inspector.Exists(context.Background(), indexKey).Result()
+				if err != nil || exists != 0 {
+					t.Fatalf("missing index exists=%d err=%v; want absent", exists, err)
+				}
+			},
+		},
+		{
+			name: "wrong-type index",
+			mutate: func(t *testing.T, inspector *goredis.Client, indexKey string) {
+				t.Helper()
+				if err := inspector.Del(context.Background(), indexKey).Err(); err != nil {
+					t.Fatal(err)
+				}
+				if err := inspector.Set(context.Background(), indexKey, "corrupt", 0).Err(); err != nil {
+					t.Fatal(err)
+				}
+			},
+			assert: func(t *testing.T, inspector *goredis.Client, indexKey string) {
+				t.Helper()
+				value, err := inspector.Get(context.Background(), indexKey).Result()
+				if err != nil || value != "corrupt" {
+					t.Fatalf("wrong-type index value=%q err=%v", value, err)
+				}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var inspector *goredis.Client
+			teamID := "tm_project_broken_index_" + strings.ReplaceAll(testCase.name, " ", "_")
+			projectID := projectV2TestID(558)
+			creationToken := strings.Repeat("5", 32)
+			indexKey := teamProjectsV2Key(teamID)
+			hook := &projectV2UncertainResultHook{
+				createSteps: []projectV2CreateScriptStep{
+					{
+						fault: projectV2CreateScriptFailAfter,
+						after: func() {
+							testCase.mutate(t, inspector, indexKey)
+						},
+					},
+					{fault: projectV2CreateScriptFailBefore},
+				},
+			}
+			srv, _, gotInspector := newProjectV2HookedStore(t, hook)
+			inspector = gotInspector
+			srv.projectIDGenerator = func() string { return projectID }
+			srv.projectTokenGenerator = func() (string, error) { return creationToken, nil }
+
+			if _, err := srv.createTeamProjectV2(
+				context.Background(),
+				teamID,
+				"Broken index project",
+			); !errors.Is(err, errProjectStoreInconsistent) {
+				t.Fatalf("broken index error = %v; want store error", err)
+			}
+			if calls := hook.createCallCount(); calls != 2 {
+				t.Fatalf("create script calls=%d; want initial and uncertain settlement", calls)
+			}
+			if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+				t.Fatalf("broken index must preserve work tree: %v", err)
+			}
+			fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+			if err != nil ||
+				fields["id"] != projectID ||
+				fields["team_id"] != teamID ||
+				fields["creation_token"] != creationToken {
+				t.Fatalf("matching metadata=%v err=%v", fields, err)
+			}
+			testCase.assert(t, inspector, indexKey)
+		})
 	}
 }
 
@@ -1222,7 +1761,13 @@ func TestV2ProjectResponsesExposeOnlyPublicFields(t *testing.T) {
 	if listResp.StatusCode != http.StatusOK {
 		t.Fatalf("list expected 200, got %d body=%s", listResp.StatusCode, listBody)
 	}
-	for _, forbidden := range []string{authV2Srv.dataDir, "api_key", "device_credential", "internal_path"} {
+	for _, forbidden := range []string{
+		authV2Srv.dataDir,
+		"api_key",
+		"device_credential",
+		"token",
+		"internal_path",
+	} {
 		if strings.Contains(string(listBody), forbidden) {
 			t.Fatalf("list response exposed %q: %s", forbidden, listBody)
 		}
