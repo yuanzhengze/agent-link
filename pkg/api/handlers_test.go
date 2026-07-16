@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 
 func cleanupTestData() {
 	ctx := context.Background()
-	for _, pattern := range []string{"agentlink:device:*", "agentlink:api_key:*", "agentlink:inbox:*", "agentlink:task:*", "agentlink:tasks:*", "agentlink:project:*", "agentlink:projects", "agentlink:lock:*", "agentlink:locks:*"} {
+	for _, pattern := range []string{"agentlink:device:*", "agentlink:api_key:*", "agentlink:inbox:*", "agentlink:task:*", "agentlink:tasks:*", "agentlink:project:*", "agentlink:projects", "agentlink:lock:*", "agentlink:locks:*", "agentlink:v2:*"} {
 		keys, _ := testRdb.Keys(ctx, pattern).Result()
 		if len(keys) > 0 {
 			testRdb.Del(ctx, keys...)
