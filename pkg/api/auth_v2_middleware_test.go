@@ -230,6 +230,88 @@ func TestRequireTeamRoleRejectsMissingIdentity(t *testing.T) {
 	}
 }
 
+func TestRequireTeamRolePreservesActorFields(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	webSess, webUser := registerTeamUser(t, "preserve")
+	team, _ := createTeamHTTP(t, webSess, "Preserve Team")
+	teamID, _ := team["id"].(string)
+	webID := userIDFromAuthResult(t, webUser)
+	webUsername := webUser["user"].(map[string]any)["username"].(string)
+
+	webResp, webBody := teamJSON(t, http.MethodGet, "/api/teams/"+teamID+"/test-actor", nil, webSess, nil)
+	if webResp.StatusCode != http.StatusOK {
+		t.Fatalf("web test-actor expected 200, got %d body=%s", webResp.StatusCode, webBody)
+	}
+	var webActor map[string]string
+	if err := json.Unmarshal(webBody, &webActor); err != nil {
+		t.Fatal(err)
+	}
+	if webActor["user_id"] != webID || webActor["username"] != webUsername {
+		t.Fatalf("web actor identity changed: %v", webActor)
+	}
+	if webActor["device_id"] != "web" || webActor["device_name"] != "web" {
+		t.Fatalf("web device fields changed: %v", webActor)
+	}
+	if webActor["session_name"] != "gui" || webActor["client_type"] != "web" {
+		t.Fatalf("web session/client changed: %v", webActor)
+	}
+	if webActor["team_id"] != teamID || webActor["role"] != "owner" {
+		t.Fatalf("web team/role = %v; want team %q role owner", webActor, teamID)
+	}
+
+	_, devUser := registerTeamUser(t, "preservedev")
+	devUsername := devUser["user"].(map[string]any)["username"].(string)
+	devResp, devBody := authJSON(t, http.MethodPost, "/api/auth/device-login", map[string]string{
+		"username":    devUsername,
+		"password":    "correct horse battery staple",
+		"device_name": "preserve-device",
+	}, nil)
+	if devResp.StatusCode != http.StatusOK {
+		t.Fatal(devBody)
+	}
+	var devResult map[string]any
+	json.Unmarshal(devBody, &devResult)
+	credential := devResult["device_credential"].(string)
+	deviceID := devResult["device_id"].(string)
+	devID := devUser["user"].(map[string]any)["id"].(string)
+
+	devTeamResp, devTeamBody := authJSON(t, http.MethodPost, "/api/teams", map[string]string{"name": "Device Preserve"}, map[string]string{
+		"Authorization": "Device " + credential,
+	})
+	if devTeamResp.StatusCode != http.StatusCreated {
+		t.Fatalf("device create team expected 201, got %d body=%s", devTeamResp.StatusCode, devTeamBody)
+	}
+	var devTeamResult map[string]any
+	json.Unmarshal(devTeamBody, &devTeamResult)
+	devTeamObj := devTeamResult["team"].(map[string]any)
+	devTeamID := devTeamObj["id"].(string)
+
+	devProbe, devProbeBody := authJSON(t, http.MethodGet, "/api/teams/"+devTeamID+"/test-actor", nil, map[string]string{
+		"Authorization": "Device " + credential,
+	})
+	if devProbe.StatusCode != http.StatusOK {
+		t.Fatalf("device test-actor expected 200, got %d body=%s", devProbe.StatusCode, devProbeBody)
+	}
+	var devActor map[string]string
+	if err := json.Unmarshal(devProbeBody, &devActor); err != nil {
+		t.Fatal(err)
+	}
+	if devActor["user_id"] != devID || devActor["username"] != devUsername {
+		t.Fatalf("device actor identity changed: %v", devActor)
+	}
+	if devActor["device_id"] != deviceID || devActor["device_name"] != "preserve-device" {
+		t.Fatalf("device fields changed: %v", devActor)
+	}
+	if devActor["session_name"] != "" || devActor["client_type"] != "device" {
+		t.Fatalf("device session/client changed: %v", devActor)
+	}
+	if devActor["team_id"] != devTeamID || devActor["role"] != "owner" {
+		t.Fatalf("device team/role = %v; want team %q role owner", devActor, devTeamID)
+	}
+}
+
 func TestRequireTeamRoleUsesAuthoritativeStoreRole(t *testing.T) {
 	ensureTeamTestRoutes(t)
 	cleanupAuthV2Keys(t)

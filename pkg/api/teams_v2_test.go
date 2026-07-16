@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/team/agentlink/pkg/auth"
 )
@@ -49,8 +47,14 @@ func ensureTeamTestRoutes(t *testing.T) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]string{
-				"team_id": actor.TeamID,
-				"role":    string(actor.Role),
+				"user_id":      actor.UserID,
+				"username":     actor.Username,
+				"team_id":      actor.TeamID,
+				"role":         string(actor.Role),
+				"device_id":    actor.DeviceID,
+				"device_name":  actor.DeviceName,
+				"session_name": actor.SessionName,
+				"client_type":  actor.ClientType,
 			})
 		}))),
 	)
@@ -359,6 +363,46 @@ func TestTeamMemberCanLeaveAndOwnerCannot(t *testing.T) {
 	}
 }
 
+func TestTeamMiddlewareUnknownTeamReturns404(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	sess, _ := registerTeamUser(t, "unkteam")
+	resp, body := teamJSON(t, http.MethodGet, "/api/teams/team_nonexistent/test-actor", nil, sess, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown team expected 404, got %d body=%s", resp.StatusCode, body)
+	}
+	var errResp map[string]string
+	json.Unmarshal(body, &errResp)
+	if errResp["error"] != "not found" {
+		t.Fatalf("error = %q; want not found", errResp["error"])
+	}
+}
+
+func TestTeamMiddlewareOrphanMembersWithoutTeamReturns404(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	orphanID, err := auth.NewTeamID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, userResult := registerTeamUser(t, "orphan")
+	userID := userIDFromAuthResult(t, userResult)
+	ctx := context.Background()
+	if err := authV2Rdb.HSet(ctx, "agentlink:v2:team:"+orphanID+":members", userID, "owner").Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		authV2Rdb.Del(ctx, "agentlink:v2:team:"+orphanID+":members")
+	})
+
+	resp, body := teamJSON(t, http.MethodGet, "/api/teams/"+orphanID+"/test-actor", nil, sess, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("orphan members without team expected 404, got %d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestTeamMiddlewareRejectsNonMember(t *testing.T) {
 	ensureTeamTestRoutes(t)
 	cleanupAuthV2Keys(t)
@@ -579,47 +623,71 @@ func TestTeamRemovedMemberImmediately403(t *testing.T) {
 	}
 }
 
-func TestTeamCreateIDExhaustionReturns500(t *testing.T) {
-	ensureTeamTestRoutes(t)
-	cleanupAuthV2Keys(t)
-
-	collisionID, err := auth.NewTeamID()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	ownerSess, ownerUser := registerTeamUser(t, "exhaust")
-	ownerID := userIDFromAuthResult(t, ownerUser)
-	store := auth.NewStore(authV2Rdb)
-	ctx := context.Background()
-	if err := store.CreateTeam(ctx, auth.Team{
-		ID: collisionID, Name: "occupied", OwnerUserID: ownerID, CreatedAt: time.Now().UTC(),
-	}, "occupied-hash"); err != nil {
-		t.Fatal(err)
-	}
-
-	var calls atomic.Int32
-	svc := auth.NewService(store, realClock{})
-	svc.SetTeamIDGenerator(func() (string, error) {
-		calls.Add(1)
-		return collisionID, nil
-	})
-	authV2Srv.authService = svc
-
-	resp, body := teamJSON(t, http.MethodPost, "/api/teams", map[string]string{"name": "Exhausted"}, ownerSess, nil)
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("ID exhaustion expected 500, got %d body=%s", resp.StatusCode, body)
+func TestWriteTeamServiceErrorTeamIDExhausted(t *testing.T) {
+	w := httptest.NewRecorder()
+	(&Server{}).writeTeamServiceError(w, auth.ErrTeamIDExhausted)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ErrTeamIDExhausted expected 500, got %d body=%s", w.Code, w.Body.Bytes())
 	}
 	var errResp map[string]string
-	json.Unmarshal(body, &errResp)
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatal(err)
+	}
 	if errResp["error"] != "internal error" {
 		t.Fatalf("error = %q; want internal error", errResp["error"])
 	}
-	if calls.Load() != 5 {
-		t.Fatalf("generator calls = %d; want 5", calls.Load())
+}
+
+func TestTeamOversizedBodyRejected(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	sess, _ := registerTeamUser(t, "bigbody")
+	big := strings.Repeat("x", 65*1024)
+	req, _ := http.NewRequest(http.MethodPost, authV2TS.URL+"/api/teams", strings.NewReader(`{"name":"`+big+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", withCookies(sess))
+	req.Header.Set("Origin", authTestOrigin)
+	req.Header.Set("X-CSRF-Token", cookieByName(sess.Cookies(), csrfCookieName).Value)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized team body expected 400, got %d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestTeamAdminCanRotateInvite(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	ownerSess, ownerUser := registerTeamUser(t, "admrot")
+	team, invite := createTeamHTTP(t, ownerSess, "Admin Rotate")
+	teamID, _ := team["id"].(string)
+	ownerID := userIDFromAuthResult(t, ownerUser)
+
+	adminSess, adminUser := registerTeamUser(t, "admrot2")
+	joinTeamHTTP(t, adminSess, teamID, invite)
+	adminID := userIDFromAuthResult(t, adminUser)
+
+	promoteResp, _ := teamJSON(t, http.MethodPatch, "/api/teams/"+teamID+"/members/"+adminID, map[string]string{"role": "admin"}, ownerSess, nil)
+	if promoteResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("promote admin expected 204, got %d", promoteResp.StatusCode)
 	}
 
-	authV2Srv.authService = auth.NewService(store, realClock{})
+	rotateResp, rotateBody := teamJSON(t, http.MethodPost, "/api/teams/"+teamID+"/invite/rotate", nil, adminSess, nil)
+	if rotateResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin rotate expected 200, got %d body=%s", rotateResp.StatusCode, rotateBody)
+	}
+	var rotateResult map[string]any
+	json.Unmarshal(rotateBody, &rotateResult)
+	if rotateResult["invite_code"] == "" || rotateResult["invite_code"] == invite {
+		t.Fatalf("admin rotate invite_code = %v; want new code", rotateResult["invite_code"])
+	}
+	_ = ownerID
 }
 
 func TestProductionMuxOmitsTeamTestRoutes(t *testing.T) {

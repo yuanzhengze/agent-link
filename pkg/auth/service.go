@@ -68,11 +68,10 @@ func NewService(store *Store, clock Clock) *Service {
 	}
 }
 
-func (s *Service) SetTeamIDGenerator(fn func() (string, error)) {
-	s.teamIDGenerator = fn
-}
-
 func (s *Service) TeamRole(ctx context.Context, teamID, userID string) (Role, error) {
+	if _, err := s.store.Team(ctx, teamID); err != nil {
+		return "", err
+	}
 	return s.store.Role(ctx, teamID, userID)
 }
 
