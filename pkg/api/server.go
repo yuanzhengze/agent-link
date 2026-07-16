@@ -175,6 +175,16 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("PATCH /api/teams/{team_id}/agents/sessions", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handlePatchSessionsV2))))
 	s.mux.Handle("DELETE /api/teams/{team_id}/agents/sessions", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleDeleteSessionV2))))
 
+	s.mux.Handle("POST /api/teams/{team_id}/messages", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleSendV2)))))
+	s.mux.Handle("GET /api/teams/{team_id}/inbox", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handlePullV2)))))
+	s.mux.Handle("POST /api/teams/{team_id}/tasks", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleSendTaskV2)))))
+	s.mux.Handle("GET /api/teams/{team_id}/tasks", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleTaskListV2)))))
+	s.mux.Handle("GET /api/teams/{team_id}/tasks/{task_id}", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTaskStatusV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/tasks/{task_id}/result", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTaskResultV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/tasks/{task_id}/resume", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTaskResumeV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/tasks/{task_id}/cancel", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTaskCancelV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/tasks/{task_id}/reopen", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleTaskReopenV2))))
+
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken
 	s.hub = hub
