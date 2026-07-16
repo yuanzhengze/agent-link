@@ -145,6 +145,17 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.HandleFunc("POST /api/auth/device-login", s.handleDeviceLogin)
 	s.mux.HandleFunc("POST /api/auth/device-logout", s.handleDeviceLogout)
 
+	s.mux.Handle("GET /api/teams", s.requireIdentity(http.HandlerFunc(s.handleListTeams)))
+	s.mux.Handle("POST /api/teams", s.requireIdentity(http.HandlerFunc(s.handleCreateTeam)))
+	s.mux.Handle("POST /api/teams/join", s.requireIdentity(http.HandlerFunc(s.handleJoinTeam)))
+	s.mux.Handle("GET /api/teams/{team_id}", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleGetTeam))))
+	s.mux.Handle("GET /api/teams/{team_id}/members", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleListTeamMembers))))
+	s.mux.Handle("POST /api/teams/{team_id}/invite/rotate", s.requireIdentity(s.requireTeamRole(auth.RoleOwner, auth.RoleAdmin)(http.HandlerFunc(s.handleRotateTeamInvite))))
+	s.mux.Handle("PATCH /api/teams/{team_id}/members/{user_id}", s.requireIdentity(s.requireTeamRole(auth.RoleOwner)(http.HandlerFunc(s.handleChangeTeamRole))))
+	s.mux.Handle("DELETE /api/teams/{team_id}/members/{user_id}", s.requireIdentity(s.requireTeamRole(auth.RoleOwner, auth.RoleAdmin)(http.HandlerFunc(s.handleRemoveTeamMember))))
+	s.mux.Handle("POST /api/teams/{team_id}/transfer-owner", s.requireIdentity(s.requireTeamRole(auth.RoleOwner)(http.HandlerFunc(s.handleTransferTeamOwner))))
+	s.mux.Handle("POST /api/teams/{team_id}/leave", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleLeaveTeam))))
+
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken
 	s.hub = hub

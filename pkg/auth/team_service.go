@@ -81,7 +81,6 @@ func (s *Service) CreateTeam(ctx context.Context, userID, name string) (CreateTe
 	}
 	inviteHash := SecretHash(inviteCode)
 
-	var lastErr error
 	for attempt := 0; attempt < createTeamMaxAttempts; attempt++ {
 		teamID, err := s.teamIDGenerator()
 		if err != nil {
@@ -98,12 +97,11 @@ func (s *Service) CreateTeam(ctx context.Context, userID, name string) (CreateTe
 			return CreateTeamResult{Team: team, InviteCode: inviteCode}, nil
 		}
 		if errors.Is(err, ErrTeamExists) {
-			lastErr = err
 			continue
 		}
 		return CreateTeamResult{}, err
 	}
-	return CreateTeamResult{}, fmt.Errorf("create team: exhausted ID attempts: %w", lastErr)
+	return CreateTeamResult{}, ErrTeamIDExhausted
 }
 
 func (s *Service) JoinTeam(ctx context.Context, userID, teamID, inviteCode string) (Team, error) {

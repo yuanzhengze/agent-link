@@ -219,3 +219,61 @@ func sha256Hex(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
+
+func (s *Server) requireTeamRole(allowed ...auth.Role) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			actor, ok := ActorFromContext(r.Context())
+			if !ok {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+
+			teamID := r.PathValue("team_id")
+			if teamID == "" {
+				writeError(w, http.StatusBadRequest, "invalid request")
+				return
+			}
+
+			role, err := s.authService.TeamRole(r.Context(), teamID, actor.UserID)
+			if err != nil {
+				if errors.Is(err, auth.ErrNotMember) {
+					writeError(w, http.StatusForbidden, "forbidden")
+					return
+				}
+				if errors.Is(err, auth.ErrNotFound) {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+
+			if len(allowed) > 0 {
+				okRole := false
+				for _, want := range allowed {
+					if role == want {
+						okRole = true
+						break
+					}
+				}
+				if !okRole {
+					writeError(w, http.StatusForbidden, "forbidden")
+					return
+				}
+			} else {
+				switch role {
+				case auth.RoleOwner, auth.RoleAdmin, auth.RoleMember:
+				default:
+					writeError(w, http.StatusForbidden, "forbidden")
+					return
+				}
+			}
+
+			actor.TeamID = teamID
+			actor.Role = role
+			ctx := context.WithValue(r.Context(), contextKeyActor, actor)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}

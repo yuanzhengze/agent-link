@@ -211,6 +211,12 @@ func TestCreateTeamIDCollisionExhaustedNoPartialIndex(t *testing.T) {
 	if err == nil {
 		t.Fatal("CreateTeam() error = nil; want failure after 5 collisions")
 	}
+	if !errors.Is(err, ErrTeamIDExhausted) {
+		t.Fatalf("CreateTeam() error = %v; want ErrTeamIDExhausted", err)
+	}
+	if errors.Is(err, ErrTeamExists) {
+		t.Fatal("exhaustion error must not wrap ErrTeamExists")
+	}
 
 	teams, err := rdb.SMembers(context.Background(), userTeamsKey(owner.ID)).Result()
 	if err != nil {
@@ -662,8 +668,8 @@ func TestCreateTeamFiveOrphanMembersCollisionsLeaveNoNewIndex(t *testing.T) {
 	}
 	cleanupAuthKeys(t, rdb, keys...)
 
-	if _, err := svc.CreateTeam(context.Background(), owner.ID, "All Orphans"); !errors.Is(err, ErrTeamExists) {
-		t.Fatalf("CreateTeam() error = %v; want exhausted ErrTeamExists", err)
+	if _, err := svc.CreateTeam(context.Background(), owner.ID, "All Orphans"); !errors.Is(err, ErrTeamIDExhausted) {
+		t.Fatalf("CreateTeam() error = %v; want ErrTeamIDExhausted", err)
 	}
 	if calls.Load() != createTeamMaxAttempts {
 		t.Fatalf("team ID generator calls = %d; want %d", calls.Load(), createTeamMaxAttempts)

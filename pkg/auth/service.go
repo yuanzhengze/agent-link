@@ -68,6 +68,26 @@ func NewService(store *Store, clock Clock) *Service {
 	}
 }
 
+func (s *Service) SetTeamIDGenerator(fn func() (string, error)) {
+	s.teamIDGenerator = fn
+}
+
+func (s *Service) TeamRole(ctx context.Context, teamID, userID string) (Role, error) {
+	return s.store.Role(ctx, teamID, userID)
+}
+
+func (s *Service) GetTeamForMember(ctx context.Context, teamID, userID string) (Team, Role, error) {
+	team, err := s.store.Team(ctx, teamID)
+	if err != nil {
+		return Team{}, "", err
+	}
+	role, err := s.store.Role(ctx, teamID, userID)
+	if err != nil {
+		return Team{}, "", err
+	}
+	return team, role, nil
+}
+
 func (s *Service) Register(ctx context.Context, input RegisterInput) (WebLoginResult, error) {
 	if _, err := NormalizeUsername(input.Username); err != nil {
 		return WebLoginResult{}, err

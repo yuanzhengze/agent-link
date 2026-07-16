@@ -15,6 +15,7 @@ var (
 	ErrNotFound           = errors.New("not found")
 	ErrUsernameExists     = errors.New("username already exists")
 	ErrTeamExists         = errors.New("team already exists")
+	ErrTeamIDExhausted    = errors.New("team id exhausted")
 	ErrAlreadyMember      = errors.New("already a team member")
 	ErrInvalidInvite      = errors.New("invalid invite")
 	ErrInvalidRole        = errors.New("invalid role")

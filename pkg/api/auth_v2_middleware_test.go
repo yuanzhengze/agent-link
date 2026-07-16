@@ -219,3 +219,36 @@ func TestPublicURLOriginMismatchOnRegister(t *testing.T) {
 		t.Fatalf("cross-origin register expected 403, got %d", resp.StatusCode)
 	}
 }
+
+func TestRequireTeamRoleRejectsMissingIdentity(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	resp, body := authJSON(t, http.MethodGet, "/api/teams/team_missing", nil, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing identity expected 401, got %d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestRequireTeamRoleUsesAuthoritativeStoreRole(t *testing.T) {
+	ensureTeamTestRoutes(t)
+	cleanupAuthV2Keys(t)
+
+	ownerSess, _ := registerTeamUser(t, "authrole")
+	team, _ := createTeamHTTP(t, ownerSess, "Auth Role Team")
+	teamID, _ := team["id"].(string)
+
+	resp, body := teamJSON(t, http.MethodGet, "/api/teams/"+teamID+"/test-actor", nil, ownerSess, map[string]string{
+		"X-Role": "member",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("test-actor expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+	var actor map[string]string
+	if err := json.Unmarshal(body, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor["role"] != "owner" {
+		t.Fatalf("authoritative role = %q; want owner", actor["role"])
+	}
+}
