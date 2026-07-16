@@ -46,13 +46,14 @@ func TestPoller_injectsWhenIdle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Poller{
-		Session:      "worker",
-		Server:       mockSrv.URL,
-		APIKey:       "sk_test",
-		Interval:     10 * time.Millisecond,
-		Ctx:          ctx,
-		Stdout:       io.Discard,
-		IdleDetector: &mockIdleDetector{busy: false, promptEmpty: true},
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_test",
+		Interval:      10 * time.Millisecond,
+		Ctx:           ctx,
+		Stdout:        io.Discard,
+		IdleDetector:  &mockIdleDetector{busy: false, promptEmpty: true},
 		capturePane: func(string) (string, error) {
 			captureCalls++
 			if captureCalls >= 3 {
@@ -93,13 +94,14 @@ func TestPoller_injectsTaskWithGuidance(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Poller{
-		Session:      "worker",
-		Server:       mockSrv.URL,
-		APIKey:       "sk_test",
-		Interval:     10 * time.Millisecond,
-		Ctx:          ctx,
-		Stdout:       io.Discard,
-		IdleDetector: &mockIdleDetector{busy: false, promptEmpty: true},
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_test",
+		Interval:      10 * time.Millisecond,
+		Ctx:           ctx,
+		Stdout:        io.Discard,
+		IdleDetector:  &mockIdleDetector{busy: false, promptEmpty: true},
 		capturePane: func(string) (string, error) {
 			captureCalls++
 			if captureCalls >= 3 {
@@ -149,13 +151,14 @@ func TestPoller_skipsWhenBusy(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Poller{
-		Session:      "worker",
-		Server:       mockSrv.URL,
-		APIKey:       "sk_test",
-		Interval:     10 * time.Millisecond,
-		Ctx:          ctx,
-		Stdout:       io.Discard,
-		IdleDetector: &mockIdleDetector{busy: true},
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_test",
+		Interval:      10 * time.Millisecond,
+		Ctx:           ctx,
+		Stdout:        io.Discard,
+		IdleDetector:  &mockIdleDetector{busy: true},
 		capturePane: func(string) (string, error) {
 			return "❯", nil
 		},
@@ -193,13 +196,14 @@ func TestPoller_skipsWhenCapturerFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Poller{
-		Session:      "worker",
-		Server:       mockSrv.URL,
-		APIKey:       "sk_test",
-		Interval:     10 * time.Millisecond,
-		Ctx:          ctx,
-		Stdout:       io.Discard,
-		IdleDetector: &mockIdleDetector{busy: false, promptEmpty: true},
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_test",
+		Interval:      10 * time.Millisecond,
+		Ctx:           ctx,
+		Stdout:        io.Discard,
+		IdleDetector:  &mockIdleDetector{busy: false, promptEmpty: true},
 		capturePane: func(string) (string, error) {
 			return "", io.ErrUnexpectedEOF // capture failed
 		},
@@ -232,13 +236,14 @@ func TestPoller_skipsWhenInboxEmpty(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	p := &Poller{
-		Session:      "worker",
-		Server:       mockSrv.URL,
-		APIKey:       "sk_test",
-		Interval:     10 * time.Millisecond,
-		Ctx:          ctx,
-		Stdout:       io.Discard,
-		IdleDetector: &mockIdleDetector{busy: false, promptEmpty: true},
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_test",
+		Interval:      10 * time.Millisecond,
+		Ctx:           ctx,
+		Stdout:        io.Discard,
+		IdleDetector:  &mockIdleDetector{busy: false, promptEmpty: true},
 		capturePane: func(string) (string, error) {
 			return "❯\n", nil
 		},
@@ -257,6 +262,47 @@ func TestPoller_skipsWhenInboxEmpty(t *testing.T) {
 
 	if injectCalls > 0 {
 		t.Errorf("expected 0 injects when inbox empty, got %d", injectCalls)
+	}
+}
+
+// TestPoller_pullsFromTeamInboxWithDeviceAuth locks in the v2 wire contract:
+// the poller pulls from /api/teams/<team>/inbox with a Device credential and
+// its local session in X-Agentlink-Session — no Bearer token, no session query.
+func TestPoller_pullsFromTeamInboxWithDeviceAuth(t *testing.T) {
+	var gotPath, gotAuth, gotSession, gotLimit string
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotSession = r.Header.Get("X-Agentlink-Session")
+		gotLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(pollerPullResponse{Items: []pollerInboxItem{}})
+	}))
+	defer mockSrv.Close()
+
+	p := &Poller{
+		Session:       "worker",
+		Server:        mockSrv.URL,
+		TeamID:        "tm_x",
+		DeviceSession: "ds_secret",
+		Stdout:        io.Discard,
+	}
+	p.initDefaults()
+
+	if _, err := p.pullOne(); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/api/teams/tm_x/inbox" {
+		t.Errorf("expected /api/teams/tm_x/inbox, got %s", gotPath)
+	}
+	if gotAuth != "Device ds_secret" {
+		t.Errorf("expected Device auth, got %q", gotAuth)
+	}
+	if gotSession != "worker" {
+		t.Errorf("expected X-Agentlink-Session=worker, got %q", gotSession)
+	}
+	if gotLimit != "1" {
+		t.Errorf("expected limit=1, got %q", gotLimit)
 	}
 }
 
@@ -282,7 +328,9 @@ func TestRunPoll_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		api.WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
+		api.WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), api.AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
 
 		err := RunPoll()
 		if err == nil {
@@ -297,10 +345,11 @@ func TestRunPoll_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		api.WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_test"}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(homeDir, ".agentlink", "credentials.json"), credData, 0600)
+		api.WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), api.AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+			Poll: api.PollConfig{Enabled: true, Interval: 5},
+		})
+		api.WriteCredentials(filepath.Join(homeDir, ".agentlink", "credentials.json"), api.AgentCredentials{DeviceSession: "ds_x"})
 
 		err := RunPoll()
 		if err == nil {
@@ -310,7 +359,27 @@ func TestRunPoll_errors(t *testing.T) {
 			t.Errorf("expected .agentlink.toml error, got: %s", err)
 		}
 	})
+
+	t.Run("no active team", func(t *testing.T) {
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
+		api.WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), api.AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "",
+			Poll: api.PollConfig{Enabled: true, Interval: 5},
+		})
+		api.WriteCredentials(filepath.Join(homeDir, ".agentlink", "credentials.json"), api.AgentCredentials{DeviceSession: "ds_x"})
+
+		err := RunPoll()
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if !strings.Contains(err.Error(), "no active team") {
+			t.Errorf("expected no-active-team error, got: %s", err)
+		}
+	})
 }
+
 func TestRunPoll_disabledByConfig(t *testing.T) {
 	t.Run("poll disabled returns nil", func(t *testing.T) {
 		homeDir := t.TempDir()
@@ -318,19 +387,17 @@ func TestRunPoll_disabledByConfig(t *testing.T) {
 
 		agentlinkDir := filepath.Join(homeDir, ".agentlink")
 		os.MkdirAll(agentlinkDir, 0755)
-		config := `server = "http://srv:8080"
-device = "dev"
-base_dir = "/tmp/agent_team"
-agent = "claude"
-
-[poll]
-enabled = false
-`
-		os.WriteFile(filepath.Join(agentlinkDir, "config.toml"), []byte(config), 0600)
-
-		creds := map[string]string{"api_key": "sk_live_test"}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+		api.WriteAccountConfig(filepath.Join(agentlinkDir, "config.toml"), api.AgentConfig{
+			Server:      "http://srv:8080",
+			UserID:      "u_1",
+			Username:    "k",
+			DeviceID:    "d_1",
+			Device:      "dev",
+			CurrentTeam: "tm_alpha",
+			BaseDir:     "/tmp/agent_team",
+			Poll:        api.PollConfig{Enabled: false, Interval: 5},
+		})
+		api.WriteCredentials(filepath.Join(agentlinkDir, "credentials.json"), api.AgentCredentials{DeviceSession: "ds_x"})
 
 		err := RunPoll()
 		if err != nil {

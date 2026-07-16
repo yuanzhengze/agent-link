@@ -66,7 +66,7 @@ func RunSessionAdd(name string) error {
 	}
 
 	// Launch tmux session and record Claude session_id
-	sessions, err := launchSessions(cfg.BaseDir, cfg.Agent, launchOpts{
+	sessions, err := launchSessionsFn(cfg.BaseDir, cfg.Agent, launchOpts{
 		Resume:   false,
 		NoPoll:   !cfg.Poll.Enabled,
 		Existing: nil,
@@ -153,8 +153,10 @@ func RunUninstall() error {
 	// Kill tmux sessions (best-effort)
 	killSessionSessions(cfg.BaseDir)
 
-	// Deregister from server
-	resp, err := api.APIDo(cfg, creds, "DELETE", "/agents/device", nil)
+	// Revoke this device's session on the server before wiping local state, so
+	// the stored credential can never be reused. If the server rejects the
+	// request, keep local files intact so the user can retry.
+	resp, err := api.APIDo(cfg, creds, "POST", "/api/auth/device-logout", nil)
 	if err != nil {
 		return err
 	}
@@ -245,8 +247,16 @@ func checkTmux() error {
 	return nil
 }
 
+// fetchSessions returns the session list for THIS device within the current
+// team. The v2 /agents endpoint returns the whole team roster, so it selects
+// the entry whose device_id matches the local config; a device that has not
+// yet appeared (no heartbeat) simply has no sessions.
 func fetchSessions(cfg *api.AgentConfig, creds *api.AgentCredentials) ([]string, error) {
-	resp, err := api.APIDo(cfg, creds, "GET", "/agents/list", nil)
+	path, err := api.TeamPath(cfg, "/agents")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := api.APIDo(cfg, creds, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +264,7 @@ func fetchSessions(cfg *api.AgentConfig, creds *api.AgentCredentials) ([]string,
 
 	var list struct {
 		Agents []struct {
+			DeviceID string   `json:"device_id"`
 			Sessions []string `json:"sessions"`
 		} `json:"agents"`
 	}
@@ -261,15 +272,20 @@ func fetchSessions(cfg *api.AgentConfig, creds *api.AgentCredentials) ([]string,
 		return nil, fmt.Errorf("cannot parse response: %w", err)
 	}
 
-	if len(list.Agents) == 0 {
-		return nil, fmt.Errorf("device not found on server")
+	for _, a := range list.Agents {
+		if a.DeviceID == cfg.DeviceID {
+			return a.Sessions, nil
+		}
 	}
-
-	return list.Agents[0].Sessions, nil
+	return nil, nil
 }
 
 func patchSessions(cfg *api.AgentConfig, creds *api.AgentCredentials, sessions []string) error {
-	resp, err := api.APIDo(cfg, creds, "PATCH", "/agents/sessions", map[string][]string{
+	path, err := api.TeamPath(cfg, "/agents/sessions")
+	if err != nil {
+		return err
+	}
+	resp, err := api.APIDo(cfg, creds, "PATCH", path, map[string][]string{
 		"sessions": sessions,
 	})
 	if err != nil {

@@ -12,18 +12,46 @@ import (
 	api "github.com/team/agentlink/pkg/cli/net"
 )
 
+// seedSessionEnv writes a logged-in v2 environment (account config with an
+// active team + device-session credential) rooted at a temp HOME, with
+// base_dir = HOME so session directories land under it.
+func seedSessionEnv(t *testing.T, serverURL string) string {
+	t.Helper()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	agentlinkDir := filepath.Join(homeDir, ".agentlink")
+	os.MkdirAll(agentlinkDir, 0755)
+	api.WriteAccountConfig(filepath.Join(agentlinkDir, "config.toml"), api.AgentConfig{
+		Server:      serverURL,
+		UserID:      "u_1",
+		Username:    "kirby",
+		DeviceID:    "d_1",
+		Device:      "test-device",
+		CurrentTeam: "tm_alpha",
+		BaseDir:     homeDir,
+	})
+	api.WriteCredentials(filepath.Join(agentlinkDir, "credentials.json"), api.AgentCredentials{DeviceSession: "ds_test"})
+	return homeDir
+}
+
 func TestRunSessionAdd(t *testing.T) {
-	// Mock server that handles both GET /agents/list and PATCH /agents/sessions
+	stubLaunch(t)
+
+	// Mock server that handles GET /agents and PATCH /agents/sessions.
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/agents/list":
+		case "/api/teams/tm_alpha/agents":
+			if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Device ") {
+				t.Errorf("expected Device auth, got %q", got)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
-					{"device": "test-device", "sessions": []string{"main", "worker"}},
+					{"device_id": "d_1", "device_name": "test-device", "sessions": []string{"main", "worker"}},
 				},
 			})
-		case "/agents/sessions":
+		case "/api/teams/tm_alpha/agents/sessions":
 			var req map[string][]string
 			json.NewDecoder(r.Body).Decode(&req)
 			r.Body.Close()
@@ -40,49 +68,26 @@ func TestRunSessionAdd(t *testing.T) {
 	defer mockSrv.Close()
 
 	t.Run("add session success", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
-		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+		homeDir := seedSessionEnv(t, mockSrv.URL)
 
 		if err := RunSessionAdd("reviewer"); err != nil {
 			t.Fatal(err)
 		}
 
-		// Verify directory created
 		sessionDir := filepath.Join(homeDir, "reviewer")
 		if _, err := os.Stat(sessionDir); err != nil {
 			t.Errorf("expected session directory to exist: %s", sessionDir)
 		}
-
-		// Verify .agentlink.toml created
-		tomlPath := filepath.Join(sessionDir, ".agentlink.toml")
-		if _, err := os.Stat(tomlPath); err != nil {
-			t.Errorf("expected .agentlink.toml to exist: %s", tomlPath)
+		if _, err := os.Stat(filepath.Join(sessionDir, ".agentlink.toml")); err != nil {
+			t.Errorf("expected .agentlink.toml to exist")
 		}
-
-		// Verify CLAUDE.md created
-		claudePath := filepath.Join(sessionDir, "CLAUDE.md")
-		if _, err := os.Stat(claudePath); err != nil {
-			t.Errorf("expected CLAUDE.md to exist: %s", claudePath)
+		if _, err := os.Stat(filepath.Join(sessionDir, "CLAUDE.md")); err != nil {
+			t.Errorf("expected CLAUDE.md to exist")
 		}
 	})
 
 	t.Run("add duplicate session", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
-		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+		seedSessionEnv(t, mockSrv.URL)
 
 		err := RunSessionAdd("main")
 		if err == nil {
@@ -107,17 +112,62 @@ func TestRunSessionAdd(t *testing.T) {
 	})
 }
 
-func TestRunSessionRemove(t *testing.T) {
+// TestSessionAddPreservesAccountConfig verifies that recording a new session's
+// id (via UpdateSessionID) leaves the account identity and current team intact.
+func TestSessionAddPreservesAccountConfig(t *testing.T) {
+	stubLaunch(t)
+
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/agents/list":
+		case "/api/teams/tm_alpha/agents":
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
-					{"device": "test-device", "sessions": []string{"main", "worker", "reviewer"}},
+					{"device_id": "d_1", "device_name": "test-device", "sessions": []string{"main"}},
 				},
 			})
-		case "/agents/sessions":
+		case "/api/teams/tm_alpha/agents/sessions":
+			var req map[string][]string
+			json.NewDecoder(r.Body).Decode(&req)
+			r.Body.Close()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"sessions": req["sessions"]})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer mockSrv.Close()
+
+	homeDir := seedSessionEnv(t, mockSrv.URL)
+
+	if err := RunSessionAdd("reviewer"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := api.LoadConfig()
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if cfg.UserID != "u_1" || cfg.Username != "kirby" || cfg.DeviceID != "d_1" {
+		t.Errorf("account identity not preserved: %+v", cfg)
+	}
+	if cfg.CurrentTeam != "tm_alpha" {
+		t.Errorf("current team not preserved: %q", cfg.CurrentTeam)
+	}
+	_ = homeDir
+}
+
+func TestRunSessionRemove(t *testing.T) {
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/teams/tm_alpha/agents":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]any{
+					{"device_id": "d_1", "device_name": "test-device", "sessions": []string{"main", "worker", "reviewer"}},
+				},
+			})
+		case "/api/teams/tm_alpha/agents/sessions":
 			var req map[string][]string
 			json.NewDecoder(r.Body).Decode(&req)
 			r.Body.Close()
@@ -132,39 +182,19 @@ func TestRunSessionRemove(t *testing.T) {
 	defer mockSrv.Close()
 
 	t.Run("remove session success", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
-		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
-
-		// Create session directory so removal can clean it up
+		homeDir := seedSessionEnv(t, mockSrv.URL)
 		os.MkdirAll(filepath.Join(homeDir, "reviewer"), 0755)
 
 		if err := RunSessionRemove("reviewer"); err != nil {
 			t.Fatal(err)
 		}
-
-		// Verify directory removed
 		if _, err := os.Stat(filepath.Join(homeDir, "reviewer")); err == nil {
 			t.Error("expected session directory to be removed")
 		}
 	})
 
 	t.Run("remove non-existing session", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
-		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+		seedSessionEnv(t, mockSrv.URL)
 
 		err := RunSessionRemove("nonexistent")
 		if err == nil {
@@ -177,59 +207,47 @@ func TestRunSessionRemove(t *testing.T) {
 }
 
 func TestRunUninstall(t *testing.T) {
-	t.Run("uninstall success", func(t *testing.T) {
+	t.Run("uninstall success revokes device session", func(t *testing.T) {
+		var gotMethod, gotPath, gotAuth string
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != "DELETE" || r.URL.Path != "/agents/device" {
-				t.Errorf("expected DELETE /agents/device, got %s %s", r.Method, r.URL.Path)
-			}
+			gotMethod = r.Method
+			gotPath = r.URL.Path
+			gotAuth = r.Header.Get("Authorization")
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		}))
 		defer mockSrv.Close()
 
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
+		homeDir := seedSessionEnv(t, mockSrv.URL)
 		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
 
 		if err := RunUninstall(); err != nil {
 			t.Fatal(err)
 		}
-
-		// Verify local cleanup
+		if gotMethod != "POST" || gotPath != "/api/auth/device-logout" {
+			t.Errorf("expected POST /api/auth/device-logout, got %s %s", gotMethod, gotPath)
+		}
+		if !strings.HasPrefix(gotAuth, "Device ") {
+			t.Errorf("expected Device auth, got %q", gotAuth)
+		}
 		if _, err := os.Stat(agentlinkDir); err == nil {
 			t.Error("expected .agentlink directory to be removed")
 		}
 	})
 
-	t.Run("uninstall server error", func(t *testing.T) {
+	t.Run("uninstall server error keeps local files", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]string{"error": "server error"})
 		}))
 		defer mockSrv.Close()
 
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
+		homeDir := seedSessionEnv(t, mockSrv.URL)
 		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), mockSrv.URL, "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
 
-		err := RunUninstall()
-		if err == nil {
-			t.Fatal("expected error for purge with server error")
+		if err := RunUninstall(); err == nil {
+			t.Fatal("expected error when device-logout fails")
 		}
-
-		// Verify local files NOT removed on API failure
 		if _, err := os.Stat(agentlinkDir); err != nil {
 			t.Error("expected .agentlink directory to remain after API failure")
 		}
@@ -264,15 +282,7 @@ func TestRunAttach_errors(t *testing.T) {
 	})
 
 	t.Run("attach directory not found", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-
-		agentlinkDir := filepath.Join(homeDir, ".agentlink")
-		os.MkdirAll(agentlinkDir, 0755)
-		api.WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), "http://localhost:1", "test-device", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_test"}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+		seedSessionEnv(t, "http://localhost:1")
 
 		err := RunAttach("nonexistent")
 		if err == nil {

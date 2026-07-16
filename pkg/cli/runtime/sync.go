@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,17 +37,29 @@ const syncReconnectBackoff = 2 * time.Second
 // is unreachable when the daemon is asked to exit.
 const syncFinalFlushTimeout = 10 * time.Second
 
-// syncEvent mirrors the server's pkg/api.Event shape (apply.go). Defined
-// locally rather than importing pkg/api, since the CLI is a separate
-// client of the wire protocol, not a consumer of server internals.
+// syncEventOwner mirrors the server's pkg/api.LockOwnerV2 shape — the
+// structured, non-secret identity stamped onto an EventV2's `by` field.
+type syncEventOwner struct {
+	UserID      string `json:"user_id"`
+	Username    string `json:"username"`
+	DeviceID    string `json:"device_id"`
+	DeviceName  string `json:"device_name"`
+	SessionName string `json:"session_name"`
+	Label       string `json:"label"`
+}
+
+// syncEvent mirrors the server's pkg/api.EventV2 shape (apply_v2.go). Defined
+// locally rather than importing pkg/api, since the CLI is a separate client of
+// the wire protocol, not a consumer of server internals.
 type syncEvent struct {
-	Type       string `json:"type"`
-	Project    string `json:"project"`
-	Path       string `json:"path"`
-	Content    string `json:"content"`
-	HeadCommit string `json:"head_commit"`
-	By         string `json:"by"`
-	At         string `json:"at"`
+	Type       string         `json:"type"`
+	TeamID     string         `json:"team_id"`
+	ProjectID  string         `json:"project_id"`
+	Path       string         `json:"path"`
+	Content    string         `json:"content"`
+	HeadCommit string         `json:"head_commit"`
+	By         syncEventOwner `json:"by"`
+	At         string         `json:"at"`
 }
 
 // Syncer keeps a local directory in sync with a cowork project on the
@@ -55,12 +68,15 @@ type syncEvent struct {
 // WebSocket — without those writes bouncing back through fsnotify and
 // re-applying (see lastWrittenHash / myOwner).
 type Syncer struct {
-	Project  string
-	LocalDir string
-	Session  string
-	Device   string
-	Server   string
-	APIKey   string
+	Project       string
+	LocalDir      string
+	Session       string
+	Device        string
+	DeviceID      string
+	UserID        string
+	TeamID        string
+	Server        string
+	DeviceSession string
 
 	// Log output. Defaults to io.Discard.
 	Stdout io.Writer
@@ -124,15 +140,47 @@ func (s *Syncer) ctx() context.Context {
 	return context.Background()
 }
 
-// myOwner is the device:session identifier the server stamps onto events
-// caused by our own applies, so we can recognize and ignore the echo.
-func (s *Syncer) myOwner() string {
-	return s.Device + ":" + s.Session
+// myOwner is the structured identity the server stamps onto events caused by
+// our own applies, so we can recognize and ignore the echo.
+func (s *Syncer) myOwner() syncEventOwner {
+	return syncEventOwner{
+		UserID:      s.UserID,
+		DeviceID:    s.DeviceID,
+		SessionName: s.Session,
+	}
+}
+
+// isSelf reports whether an event's owner is this syncer's own actor/session,
+// matching on the stable identity fields (user + device + session) rather than
+// the human-readable label.
+func (s *Syncer) isSelf(owner syncEventOwner) bool {
+	return owner.UserID == s.UserID &&
+		owner.DeviceID == s.DeviceID &&
+		owner.SessionName == s.Session
 }
 
 func hash(content string) string {
 	sum := sha256.Sum256([]byte(content))
 	return hex.EncodeToString(sum[:])
+}
+
+// teamPath builds a team-scoped path for team-level endpoints (e.g. locks).
+func (s *Syncer) teamPath(suffix string) string {
+	return "/api/teams/" + url.PathEscape(s.TeamID) + suffix
+}
+
+// projectPath builds a team-scoped path for a specific project (snapshot/apply).
+func (s *Syncer) projectPath(suffix string) string {
+	return "/api/teams/" + url.PathEscape(s.TeamID) +
+		"/projects/" + url.PathEscape(s.Project) + suffix
+}
+
+// authHeaders stamps the Device credential and local session onto a request.
+// The Device Session secret travels only in the Authorization header, never in
+// the URL or query string.
+func (s *Syncer) authHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Device "+s.DeviceSession)
+	req.Header.Set("X-Agentlink-Session", s.Session)
 }
 
 // -- snapshot --
@@ -154,12 +202,11 @@ type syncSnapshotResponse struct {
 func (s *Syncer) pullSnapshot() error {
 	s.initDefaults()
 
-	url := fmt.Sprintf("%s/projects/%s/snapshot", s.Server, s.Project)
-	req, err := http.NewRequestWithContext(s.ctx(), "GET", url, nil)
+	req, err := http.NewRequestWithContext(s.ctx(), "GET", s.Server+s.projectPath("/snapshot"), nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+s.APIKey)
+	s.authHeaders(req)
 
 	resp, err := s.httpDo(req)
 	if err != nil {
@@ -194,17 +241,15 @@ func (s *Syncer) pullSnapshot() error {
 // -- local -> server --
 
 type syncLockAcquireRequest struct {
-	Project string `json:"project"`
-	Session string `json:"session"`
-	Path    string `json:"path"`
+	ProjectID string `json:"project_id"`
+	Path      string `json:"path"`
 }
 
 type syncLockAcquireResponse struct {
-	Owner string `json:"owner"`
+	Owner syncEventOwner `json:"owner"`
 }
 
 type syncApplyRequest struct {
-	Session string `json:"session"`
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
@@ -319,16 +364,16 @@ func (s *Syncer) flushDirty(ctx context.Context) {
 // acquireLock requests the file lock for rel. conflict is true on a 409
 // (someone else holds it); the caller should skip the apply, not error out.
 func (s *Syncer) acquireLock(ctx context.Context, rel string) (conflict bool, err error) {
-	body, err := json.Marshal(syncLockAcquireRequest{Project: s.Project, Session: s.Session, Path: rel})
+	body, err := json.Marshal(syncLockAcquireRequest{ProjectID: s.Project, Path: rel})
 	if err != nil {
 		return false, err
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", s.Server+"/locks/acquire", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.Server+s.teamPath("/locks/acquire"), bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.APIKey)
+	s.authHeaders(req)
 
 	resp, err := s.httpDo(req)
 	if err != nil {
@@ -351,17 +396,16 @@ func (s *Syncer) acquireLock(ctx context.Context, rel string) (conflict bool, er
 // applyOne uploads rel's new content. conflict is true on a 409 (the lock
 // was lost or held by someone else between acquire and apply).
 func (s *Syncer) applyOne(ctx context.Context, rel, content string) (conflict bool, err error) {
-	body, err := json.Marshal(syncApplyRequest{Session: s.Session, Path: rel, Content: content})
+	body, err := json.Marshal(syncApplyRequest{Path: rel, Content: content})
 	if err != nil {
 		return false, err
 	}
-	url := fmt.Sprintf("%s/projects/%s/apply", s.Server, s.Project)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.Server+s.projectPath("/apply"), bytes.NewReader(body))
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.APIKey)
+	s.authHeaders(req)
 
 	resp, err := s.httpDo(req)
 	if err != nil {
@@ -410,7 +454,7 @@ func (s *Syncer) handleRemoteEvent(ev syncEvent) error {
 	if ev.Type != "file_changed" {
 		return nil
 	}
-	if ev.By == s.myOwner() {
+	if s.isSelf(ev.By) {
 		return nil
 	}
 
@@ -631,14 +675,20 @@ func isHiddenPath(base, path string) bool {
 // backoff, honoring Ctx cancellation) whenever the dial or read fails.
 func (s *Syncer) wsLoop() {
 	wsBase := "ws" + strings.TrimPrefix(s.Server, "http")
-	url := fmt.Sprintf("%s/ws?project=%s&token=%s", wsBase, s.Project, s.APIKey)
+	wsURL := fmt.Sprintf("%s%s?project=%s", wsBase, s.teamPath("/ws"), url.QueryEscape(s.Project))
+
+	// The Device Session travels in the Authorization header, never in the URL.
+	headers := http.Header{}
+	headers.Set("Authorization", "Device "+s.DeviceSession)
+	headers.Set("X-Agentlink-Session", s.Session)
+	dialOpts := &websocket.DialOptions{HTTPHeader: headers}
 
 	for {
 		if s.ctx().Err() != nil {
 			return
 		}
 
-		conn, _, err := websocket.Dial(s.ctx(), url, nil)
+		conn, _, err := websocket.Dial(s.ctx(), wsURL, dialOpts)
 		if err != nil {
 			fmt.Fprintf(s.Stdout, "sync: ws dial failed: %s\n", err)
 			if !s.sleepOrDone(syncReconnectBackoff) {
@@ -706,6 +756,9 @@ func RunSync(project, localDir string) error {
 	if err != nil {
 		return err
 	}
+	if cfg.CurrentTeam == "" {
+		return fmt.Errorf("no active team; run agentlink team use <team_id> before sync")
+	}
 
 	session, err := api.FindCurrentSession()
 	if err != nil {
@@ -720,14 +773,17 @@ func RunSync(project, localDir string) error {
 	defer stop()
 
 	s := &Syncer{
-		Project:  project,
-		LocalDir: localDir,
-		Session:  session,
-		Device:   cfg.Device,
-		Server:   cfg.Server,
-		APIKey:   creds.APIKey,
-		Stdout:   os.Stdout,
-		Ctx:      ctx,
+		Project:       project,
+		LocalDir:      localDir,
+		Session:       session,
+		Device:        cfg.Device,
+		DeviceID:      cfg.DeviceID,
+		UserID:        cfg.UserID,
+		TeamID:        cfg.CurrentTeam,
+		Server:        cfg.Server,
+		DeviceSession: creds.DeviceSession,
+		Stdout:        os.Stdout,
+		Ctx:           ctx,
 	}
 	s.initDefaults()
 	if err := s.Run(); err != nil && err != context.Canceled {

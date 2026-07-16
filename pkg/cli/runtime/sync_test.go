@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,8 +16,11 @@ import (
 
 func TestSync_snapshotWritesFiles(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/projects/p1/snapshot" {
+		if r.URL.Path != "/api/teams/tm_x/projects/p1/snapshot" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Device ds_test" {
+			t.Errorf("expected Device auth, got %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -31,11 +35,12 @@ func TestSync_snapshotWritesFiles(t *testing.T) {
 
 	dir := t.TempDir()
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
+		Project:       "p1",
+		LocalDir:      dir,
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
 	}
 
 	if err := s.pullSnapshot(); err != nil {
@@ -64,12 +69,16 @@ func TestSync_localChangeCallsApply(t *testing.T) {
 	var applyBody map[string]string
 	applyCalls := 0
 
+	var lockBody map[string]string
 	mux := http.NewServeMux()
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		json.NewDecoder(r.Body).Decode(&lockBody)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
+		json.NewEncoder(w).Encode(map[string]any{"owner": map[string]string{"label": "u@dev1/main"}})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		applyCalls++
 		json.NewDecoder(r.Body).Decode(&applyBody)
@@ -86,13 +95,16 @@ func TestSync_localChangeCallsApply(t *testing.T) {
 	}
 
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
 	}
 
 	if err := s.handleLocalChange(context.Background(), "a.html"); err != nil {
@@ -104,14 +116,92 @@ func TestSync_localChangeCallsApply(t *testing.T) {
 	if applyCalls != 1 {
 		t.Fatalf("expected exactly 1 apply call, got %d", applyCalls)
 	}
-	if applyBody["session"] != "main" {
-		t.Errorf("expected session=main, got %q", applyBody["session"])
+	if lockBody["project_id"] != "p1" {
+		t.Errorf("expected lock project_id=p1, got %q", lockBody["project_id"])
+	}
+	if _, ok := lockBody["session"]; ok {
+		t.Errorf("lock body must not contain session; got %v", lockBody)
+	}
+	if _, ok := applyBody["session"]; ok {
+		t.Errorf("apply body must not contain session; got %v", applyBody)
 	}
 	if applyBody["path"] != "a.html" {
 		t.Errorf("expected path=a.html, got %q", applyBody["path"])
 	}
 	if applyBody["content"] != "<p>local edit</p>" {
 		t.Errorf("expected content=%q, got %q", "<p>local edit</p>", applyBody["content"])
+	}
+}
+
+// TestSyncWSUsesDeviceHeaderNotQueryCredential proves the sync WebSocket dial
+// carries the Device credential in the Authorization header (plus the local
+// session header) and never leaks it into the URL/query, hitting the
+// team-scoped /api/teams/<team>/ws?project=<id> endpoint.
+func TestSyncWSUsesDeviceHeaderNotQueryCredential(t *testing.T) {
+	var (
+		mu                                  sync.Mutex
+		gotPath, gotQuery, gotAuth, gotSess string
+		seen                                = make(chan struct{}, 1)
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		gotSess = r.Header.Get("X-Agentlink-Session")
+		mu.Unlock()
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+		// Refuse the upgrade so wsLoop's dial fails fast and it backs off.
+		http.Error(w, "no upgrade", http.StatusNotImplemented)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Syncer{
+		Project:       "p1",
+		TeamID:        "tm_x",
+		Session:       "worker",
+		DeviceSession: "ds_secret",
+		Server:        srv.URL,
+		Stdout:        io.Discard,
+		Ctx:           ctx,
+	}
+	s.initDefaults()
+
+	done := make(chan struct{})
+	go func() {
+		s.wsLoop()
+		close(done)
+	}()
+
+	select {
+	case <-seen:
+	case <-time.After(3 * time.Second):
+		cancel()
+		t.Fatal("ws dial never reached the server")
+	}
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotPath != "/api/teams/tm_x/ws" {
+		t.Errorf("expected /api/teams/tm_x/ws, got %s", gotPath)
+	}
+	if gotAuth != "Device ds_secret" {
+		t.Errorf("expected Device auth header, got %q", gotAuth)
+	}
+	if gotSess != "worker" {
+		t.Errorf("expected X-Agentlink-Session=worker, got %q", gotSess)
+	}
+	if !strings.Contains(gotQuery, "project=p1") {
+		t.Errorf("expected project=p1 in query, got %q", gotQuery)
+	}
+	if strings.Contains(gotQuery, "ds_secret") || strings.Contains(gotQuery, "token") {
+		t.Errorf("credential/token must never appear in the ws query: %q", gotQuery)
 	}
 }
 
@@ -126,11 +216,11 @@ func TestSync_wsWritesRemoteFile(t *testing.T) {
 	}
 
 	ev := syncEvent{
-		Type:    "file_changed",
-		Project: "p1",
-		Path:    "a.html",
-		Content: "<h1>x</h1>",
-		By:      "otherdev:other",
+		Type:      "file_changed",
+		ProjectID: "p1",
+		Path:      "a.html",
+		Content:   "<h1>x</h1>",
+		By:        syncEventOwner{UserID: "u_other", DeviceID: "otherdev", SessionName: "other", Label: "other@otherdev/other"},
 	}
 	if err := s.handleRemoteEvent(ev); err != nil {
 		t.Fatalf("handleRemoteEvent: %v", err)
@@ -148,11 +238,11 @@ func TestSync_wsWritesRemoteFile(t *testing.T) {
 func TestSync_ignoresEchoedChange(t *testing.T) {
 	applyCalls := 0
 	mux := http.NewServeMux()
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		applyCalls++
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
@@ -162,23 +252,26 @@ func TestSync_ignoresEchoedChange(t *testing.T) {
 
 	dir := t.TempDir()
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
 	}
 
 	// A remote (other device) event writes the file and records its hash
 	// as "the last thing we wrote", simulating the WS write-back path.
 	ev := syncEvent{
-		Type:    "file_changed",
-		Project: "p1",
-		Path:    "b.html",
-		Content: "<p>remote content</p>",
-		By:      "otherdev:other",
+		Type:      "file_changed",
+		ProjectID: "p1",
+		Path:      "b.html",
+		Content:   "<p>remote content</p>",
+		By:        syncEventOwner{UserID: "u_other", DeviceID: "otherdev", SessionName: "other", Label: "other@otherdev/other"},
 	}
 	if err := s.handleRemoteEvent(ev); err != nil {
 		t.Fatalf("handleRemoteEvent: %v", err)
@@ -198,11 +291,11 @@ func TestSync_ignoresEchoedChange(t *testing.T) {
 	// Self-authored events (by == myOwner) must also be ignored, so our
 	// own applies echoed back over WS don't get rewritten locally either.
 	selfEv := syncEvent{
-		Type:    "file_changed",
-		Project: "p1",
-		Path:    "c.html",
-		Content: "<p>should not be written</p>",
-		By:      s.myOwner(),
+		Type:      "file_changed",
+		ProjectID: "p1",
+		Path:      "c.html",
+		Content:   "<p>should not be written</p>",
+		By:        s.myOwner(),
 	}
 	if err := s.handleRemoteEvent(selfEv); err != nil {
 		t.Fatalf("handleRemoteEvent(self): %v", err)
@@ -223,11 +316,11 @@ func TestSync_flushDirtyAppliesSequentially(t *testing.T) {
 	appliedContent := map[string]string{}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
@@ -248,13 +341,16 @@ func TestSync_flushDirtyAppliesSequentially(t *testing.T) {
 	}
 
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
 	}
 	s.initDefaults()
 
@@ -295,11 +391,11 @@ func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
 	var appliedContents []string
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
@@ -318,13 +414,16 @@ func TestSync_flushDirtyAppliesCurrentContentOnRedirty(t *testing.T) {
 	}
 
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
 	}
 	s.initDefaults()
 
@@ -379,14 +478,14 @@ func TestSync_finalFlushUsesLiveContext(t *testing.T) {
 	var appliedContent string
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		acquireCalls++
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
@@ -408,14 +507,17 @@ func TestSync_finalFlushUsesLiveContext(t *testing.T) {
 	cancel() // Ctx is already cancelled, exactly as it is when flushWorker's ctx.Done() branch runs.
 
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
-		Ctx:      cancelledCtx,
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
+		Ctx:           cancelledCtx,
 	}
 	s.initDefaults()
 
@@ -464,7 +566,7 @@ func TestSync_runFlushesOnShutdown(t *testing.T) {
 	snapshotServed := make(chan struct{}, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/projects/p1/snapshot", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/snapshot", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"head_commit": "deadbeef",
@@ -475,11 +577,11 @@ func TestSync_runFlushesOnShutdown(t *testing.T) {
 		default:
 		}
 	})
-	mux.HandleFunc("/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/locks/acquire", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"owner": "dev1:main"})
 	})
-	mux.HandleFunc("/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/projects/p1/apply", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
@@ -489,7 +591,7 @@ func TestSync_runFlushesOnShutdown(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"head_commit": "abc123"})
 	})
-	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/teams/tm_x/ws", func(w http.ResponseWriter, r *http.Request) {
 		// No real WS upgrade needed for this test; just refuse politely
 		// so wsLoop's dial fails fast and it backs off without noise.
 		http.Error(w, "not implemented", http.StatusNotImplemented)
@@ -501,15 +603,18 @@ func TestSync_runFlushesOnShutdown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Syncer{
-		Project:  "p1",
-		LocalDir: dir,
-		Session:  "main",
-		Device:   "dev1",
-		Server:   srv.URL,
-		APIKey:   "sk_test",
-		Stdout:   io.Discard,
-		Ctx:      ctx,
-		debounce: time.Hour, // never fires on its own during this test
+		Project:       "p1",
+		LocalDir:      dir,
+		Session:       "main",
+		Device:        "dev1",
+		DeviceID:      "d_1",
+		UserID:        "u_1",
+		TeamID:        "tm_x",
+		Server:        srv.URL,
+		DeviceSession: "ds_test",
+		Stdout:        io.Discard,
+		Ctx:           ctx,
+		debounce:      time.Hour, // never fires on its own during this test
 	}
 
 	runErrCh := make(chan error, 1)

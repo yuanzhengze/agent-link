@@ -2,7 +2,6 @@ package rt
 
 import (
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,15 +22,21 @@ func RunResume() error {
 	if err != nil {
 		return err
 	}
+	if cfg.CurrentTeam == "" {
+		return fmt.Errorf("no active team; run agentlink team use <team_id> before resume")
+	}
 
 	if err := checkTmux(); err != nil {
 		return err
 	}
 
-	// Verify the device is still registered on the server. If it was
-	// uninstalled, resume cannot proceed — the user must re-init.
+	// Verify the device session is still valid AND we are still a member of
+	// the current team. A team heartbeat exercises both: a revoked device
+	// session yields 401, and a removed membership yields 404/403 — either
+	// way resume cannot proceed and the user must re-login or re-select a
+	// team.
 	if err := pingServer(cfg, creds); err != nil {
-		return fmt.Errorf("device check failed (was it uninstalled?): %w", err)
+		return fmt.Errorf("device/team check failed (was the device logged out or removed from the team?): %w", err)
 	}
 
 	// Determine which sessions to resume. With [sessions], use those keys;
@@ -98,16 +103,19 @@ func resumeSessionList(cfg *api.AgentConfig) ([]string, bool) {
 	return names, true
 }
 
-// pingServer verifies the device is still registered by issuing a heartbeat.
-// Returns an error if the server rejects the credentials.
+// pingServer verifies the device session is valid and the current team
+// membership still holds by issuing a team-scoped heartbeat. APIDo already maps
+// any non-2xx status (401 revoked device, 404/403 removed membership) to an
+// error, so a successful return means both checks passed.
 func pingServer(cfg *api.AgentConfig, creds *api.AgentCredentials) error {
-	resp, err := api.APIDo(cfg, creds, "POST", "/agents/heartbeat", nil)
+	path, err := api.TeamPath(cfg, "/agents/heartbeat")
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+	resp, err := api.APIDo(cfg, creds, "POST", path, nil)
+	if err != nil {
+		return err
 	}
+	resp.Body.Close()
 	return nil
 }
