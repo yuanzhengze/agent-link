@@ -1,6 +1,7 @@
 .gopath/
 /vendor/
 /agentlink
+/agentlink-admin
 /server
 /tmp/
 *-linux

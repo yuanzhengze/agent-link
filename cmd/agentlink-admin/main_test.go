@@ -5,7 +5,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"regexp"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,10 @@ import (
 type fixedClock struct{ t time.Time }
 
 func (c fixedClock) Now() time.Time { return c.t }
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error { return f() }
 
 func newTestRedis(t *testing.T) *redis.Client {
 	t.Helper()
@@ -281,15 +286,159 @@ func TestRunMissingResetPasswordArgsDoesNotUseRedis(t *testing.T) {
 	}
 }
 
-func TestRunResetPasswordAtomicFailureNoStdoutSecret(t *testing.T) {
-	_, store, rdb, user, username, _, _ := setupUserWithSessions(t)
+func TestRunUnknownUserSubcommandDoesNotUseRedis(t *testing.T) {
+	rdb := unreachableRedisClient(t)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"user", "unknown-subcommand"}, &stdout, &stderr, rdb)
+	if code != 2 {
+		t.Fatalf("run() code = %d stderr = %q; want 2 without touching Redis", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage:") {
+		t.Fatalf("stderr = %q; want usage", stderr.String())
+	}
+}
+
+func TestExecuteRejectsInvalidCommandBeforeConnectingRedis(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "no command"},
+		{name: "unknown command", args: []string{"unknown"}},
+		{name: "missing username", args: []string{"user", "reset-password"}},
+		{name: "unknown user subcommand", args: []string{"user", "unknown-subcommand"}},
+		{name: "extra argument", args: []string{"user", "reset-password", "kirby", "extra"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var connectCalls int
+			connect := func(string) (*redis.Client, io.Closer, error) {
+				connectCalls++
+				return nil, nil, errors.New("must not connect")
+			}
+			getenv := func(string) string { return "127.0.0.1:1" }
+			var stdout, stderr bytes.Buffer
+
+			code := execute(tt.args, &stdout, &stderr, getenv, connect)
+
+			if code != 2 {
+				t.Fatalf("execute() code = %d stderr = %q; want 2", code, stderr.String())
+			}
+			if connectCalls != 0 {
+				t.Fatalf("Redis connect calls = %d; want 0", connectCalls)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("stdout = %q; want empty", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "Usage:") {
+				t.Fatalf("stderr = %q; want usage", stderr.String())
+			}
+		})
+	}
+}
+
+func TestExecuteCloseFailureWarnsWithoutChangingSuccessCode(t *testing.T) {
+	_, _, rdb, _, username, _, _ := setupUserWithSessions(t)
+	var closeCalls int
+	connect := func(addr string) (*redis.Client, io.Closer, error) {
+		if addr != "localhost:6379" {
+			t.Fatalf("connect address = %q; want default localhost:6379", addr)
+		}
+		return rdb, closeFunc(func() error {
+			closeCalls++
+			return errors.New("controlled close failure")
+		}), nil
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := execute(
+		[]string{"user", "reset-password", username},
+		&stdout,
+		&stderr,
+		func(string) string { return "" },
+		connect,
+	)
+
+	if code != 0 {
+		t.Fatalf("execute() code = %d stderr = %q; want 0", code, stderr.String())
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close calls = %d; want 1", closeCalls)
+	}
+	tempPassword := parseTemporaryPassword(t, stdout.String())
+	assertPasswordAppearsOnce(t, stdout.String(), tempPassword)
+	if !strings.Contains(stderr.String(), "warning") {
+		t.Fatalf("stderr = %q; want close warning", stderr.String())
+	}
+	if strings.Contains(stderr.String(), tempPassword) ||
+		strings.Contains(stderr.String(), "temporary_password") {
+		t.Fatalf("close warning leaked temporary password: %q", stderr.String())
+	}
+	assertNoSecretLeak(t, stderr.String())
+}
+
+func TestExecuteCloseFailurePreservesRunFailureCode(t *testing.T) {
+	rdb := newTestRedis(t)
+	connect := func(string) (*redis.Client, io.Closer, error) {
+		return rdb, closeFunc(func() error {
+			return errors.New("controlled close failure")
+		}), nil
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := execute(
+		[]string{"user", "reset-password", "bad!name"},
+		&stdout,
+		&stderr,
+		func(string) string { return "localhost:6379" },
+		connect,
+	)
+
+	if code != 1 {
+		t.Fatalf("execute() code = %d stderr = %q; want original run code 1", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q; want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "username") ||
+		!strings.Contains(stderr.String(), "warning") {
+		t.Fatalf("stderr = %q; want validation error and close warning", stderr.String())
+	}
+	assertNoSecretLeak(t, stderr.String())
+}
+
+func TestRunResetPasswordLuaPreflightFailureIsAtomic(t *testing.T) {
+	_, store, rdb, user, username, web, device := setupUserWithSessions(t)
 	ctx := context.Background()
-	if err := rdb.Del(ctx, "agentlink:v2:user:"+user.ID).Err(); err != nil {
+	beforeUser, err := store.UserByID(ctx, user.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := store.UserByID(ctx, user.ID)
-	if err == nil {
-		t.Fatalf("UserByID() before failure = %+v; want missing user hash", before)
+	webHash := auth.SecretHash(web.SessionSecret)
+	deviceHash := auth.SecretHash(device.DeviceCredential)
+	webSessionKey := "agentlink:v2:web_session:" + webHash
+	deviceSessionKey := "agentlink:v2:device_session:" + deviceHash
+	deviceBindingKey := "agentlink:v2:device_credential:" + deviceHash
+	deviceKey := "agentlink:v2:device:" + device.DeviceID
+	userKey := "agentlink:v2:user:" + user.ID
+	webIndexKey := userKey + ":web_sessions"
+	deviceIndexKey := userKey + ":device_sessions"
+	devicesIndexKey := userKey + ":devices"
+
+	webSessionBefore := redisHash(t, rdb, webSessionKey)
+	deviceSessionBefore := redisHash(t, rdb, deviceSessionKey)
+	deviceBindingBefore := redisHash(t, rdb, deviceBindingKey)
+	deviceBefore := redisHash(t, rdb, deviceKey)
+	deviceIndexBefore := redisZSet(t, rdb, deviceIndexKey)
+	devicesIndexBefore := redisSet(t, rdb, devicesIndexKey)
+
+	if err := rdb.Del(ctx, webIndexKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	const wrongTypeValue = "controlled-wrong-type"
+	if err := rdb.Set(ctx, webIndexKey, wrongTypeValue, 0).Err(); err != nil {
+		t.Fatal(err)
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -300,9 +449,43 @@ func TestRunResetPasswordAtomicFailureNoStdoutSecret(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q; want empty on atomic failure", stdout.String())
 	}
+	if got := stderr.String(); got != "reset password failed; check Redis connectivity and data integrity\n" {
+		t.Fatalf("stderr = %q; want generic runtime error", got)
+	}
 	assertNoSecretLeak(t, stderr.String())
-	if matched, _ := regexp.MatchString(`temporary_password=`, stdout.String()); matched {
-		t.Fatalf("stdout leaked temporary_password on failure: %q", stdout.String())
+
+	afterUser, err := store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterUser.PasswordPHC != beforeUser.PasswordPHC ||
+		afterUser.PasswordVersion != beforeUser.PasswordVersion ||
+		afterUser.MustChangePassword != beforeUser.MustChangePassword {
+		t.Fatalf("user password state changed: before=%+v after=%+v", beforeUser, afterUser)
+	}
+	if ok, err := auth.VerifyPassword(afterUser.PasswordPHC, "correct horse battery staple"); err != nil || !ok {
+		t.Fatalf("old password verify = %v, %v; want true, nil", ok, err)
+	}
+	if got, err := rdb.Get(ctx, webIndexKey).Result(); err != nil || got != wrongTypeValue {
+		t.Fatalf("wrong-type web index = %q, %v; want unchanged", got, err)
+	}
+	if got := redisHash(t, rdb, webSessionKey); !reflect.DeepEqual(got, webSessionBefore) {
+		t.Fatalf("web session changed: before=%v after=%v", webSessionBefore, got)
+	}
+	if got := redisHash(t, rdb, deviceSessionKey); !reflect.DeepEqual(got, deviceSessionBefore) {
+		t.Fatalf("device session changed: before=%v after=%v", deviceSessionBefore, got)
+	}
+	if got := redisHash(t, rdb, deviceBindingKey); !reflect.DeepEqual(got, deviceBindingBefore) {
+		t.Fatalf("device binding changed: before=%v after=%v", deviceBindingBefore, got)
+	}
+	if got := redisHash(t, rdb, deviceKey); !reflect.DeepEqual(got, deviceBefore) {
+		t.Fatalf("device changed: before=%v after=%v", deviceBefore, got)
+	}
+	if got := redisZSet(t, rdb, deviceIndexKey); !reflect.DeepEqual(got, deviceIndexBefore) {
+		t.Fatalf("device session index changed: before=%v after=%v", deviceIndexBefore, got)
+	}
+	if got := redisSet(t, rdb, devicesIndexKey); !reflect.DeepEqual(got, devicesIndexBefore) {
+		t.Fatalf("devices index changed: before=%v after=%v", devicesIndexBefore, got)
 	}
 }
 
@@ -326,4 +509,31 @@ func unreachableRedisClient(t *testing.T) *redis.Client {
 	inner := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1"})
 	t.Cleanup(func() { _ = inner.Close() })
 	return &redis.Client{Client: inner}
+}
+
+func redisHash(t *testing.T, rdb *redis.Client, key string) map[string]string {
+	t.Helper()
+	value, err := rdb.HGetAll(context.Background(), key).Result()
+	if err != nil {
+		t.Fatalf("read Redis hash %q: %v", key, err)
+	}
+	return value
+}
+
+func redisZSet(t *testing.T, rdb *redis.Client, key string) []goredis.Z {
+	t.Helper()
+	value, err := rdb.ZRangeWithScores(context.Background(), key, 0, -1).Result()
+	if err != nil {
+		t.Fatalf("read Redis zset %q: %v", key, err)
+	}
+	return value
+}
+
+func redisSet(t *testing.T, rdb *redis.Client, key string) []string {
+	t.Helper()
+	value, err := rdb.SMembers(context.Background(), key).Result()
+	if err != nil {
+		t.Fatalf("read Redis set %q: %v", key, err)
+	}
+	return value
 }
