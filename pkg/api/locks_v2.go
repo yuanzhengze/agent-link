@@ -35,9 +35,15 @@ if cur and cur ~= ARGV[1] and exp > tonumber(ARGV[2]) then
   return 0
 end
 local acquired = ARGV[2]
+local task_id = ARGV[5]
 if cur == ARGV[1] then
   local prev = redis.call('HGET', KEYS[1], 'acquired_at')
   if prev then acquired = prev end
+  -- Refresh: keep the existing task_id unless the caller supplies a new one.
+  if task_id == '' then
+    local prevTask = redis.call('HGET', KEYS[1], 'task_id')
+    if prevTask then task_id = prevTask end
+  end
 elseif cur then
   local oldset = redis.call('HGET', KEYS[1], 'owner_set')
   if oldset then redis.call('SREM', oldset, ARGV[4]) end
@@ -46,7 +52,7 @@ redis.call('HSET', KEYS[1],
   'owner_id', ARGV[1],
   'acquired_at', acquired,
   'lease_expires_at', ARGV[3],
-  'task_id', ARGV[5],
+  'task_id', task_id,
   'owner_set', ARGV[6],
   'user_id', ARGV[7],
   'username', ARGV[8],
@@ -366,6 +372,7 @@ func (s *Server) handleLockListV2(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prefix := "agentlink:v2:lock:" + actor.TeamID + ":" + projectID + ":"
+	seen := make(map[string]struct{})
 	var keys []string
 	var cursor uint64
 	for {
@@ -374,7 +381,14 @@ func (s *Server) handleLockListV2(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
-		keys = append(keys, batch...)
+		// SCAN may return the same key more than once; de-duplicate.
+		for _, key := range batch {
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
 		cursor = next
 		if cursor == 0 {
 			break

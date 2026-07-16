@@ -316,6 +316,108 @@ func TestV2LockReleaseAndConflict(t *testing.T) {
 	}
 }
 
+func TestV2LockExpiredLeaseIsReclaimedAndOldOwnerSetCleaned(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	holder, holderResult := registerTeamUser(t, "lockreclaimA")
+	team, invite := createTeamHTTP(t, holder, "Reclaim Team")
+	teamID := team["id"].(string)
+	project := createProjectV2HTTP(t, holder, teamID, "Reclaim Project")
+	holderUsername := holderResult["user"].(map[string]any)["username"].(string)
+
+	reclaimer, reclaimerResult := registerTeamUser(t, "lockreclaimB")
+	joinTeamHTTP(t, reclaimer, teamID, invite)
+	reclaimerUsername := reclaimerResult["user"].(map[string]any)["username"].(string)
+
+	resp, body := acquireLockWebV2(t, holder, teamID, map[string]any{
+		"project_id": project.ID,
+		"path":       "index.html",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("holder acquire expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+
+	// Force the lease to have already expired so it can be reclaimed.
+	key := lockV2Key(teamID, project.ID, "index.html")
+	holderSet := authV2Rdb.HGet(context.Background(), key, "owner_set").Val()
+	if err := authV2Rdb.HSet(context.Background(), key, "lease_expires_at", "1").Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	reResp, reBody := acquireLockWebV2(t, reclaimer, teamID, map[string]any{
+		"project_id": project.ID,
+		"path":       "index.html",
+	})
+	if reResp.StatusCode != http.StatusOK {
+		t.Fatalf("expired lease reclaim expected 200, got %d body=%s", reResp.StatusCode, reBody)
+	}
+	var acquired LockAcquireResponseV2
+	if err := json.Unmarshal(reBody, &acquired); err != nil {
+		t.Fatal(err)
+	}
+	if acquired.Owner.Username != reclaimerUsername {
+		t.Fatalf("reclaimed owner = %q; want %q", acquired.Owner.Username, reclaimerUsername)
+	}
+
+	// The previous holder's locks set must no longer reference the member.
+	member := lockMember(project.ID, "index.html")
+	stillMember, err := authV2Rdb.SIsMember(context.Background(), holderSet, member).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillMember {
+		t.Fatalf("old owner set %q still holds member %q after reclaim", holderSet, member)
+	}
+	if stored := authV2Rdb.HGet(context.Background(), key, "username").Val(); stored == holderUsername {
+		t.Fatalf("lock hash still owned by old holder %q", holderUsername)
+	}
+}
+
+func TestV2LockForceReleaseByAnotherMember(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	holder, _ := registerTeamUser(t, "lockforceA")
+	team, invite := createTeamHTTP(t, holder, "Force Team")
+	teamID := team["id"].(string)
+	project := createProjectV2HTTP(t, holder, teamID, "Force Project")
+
+	other, _ := registerTeamUser(t, "lockforceB")
+	joinTeamHTTP(t, other, teamID, invite)
+
+	resp, body := acquireLockWebV2(t, holder, teamID, map[string]any{
+		"project_id": project.ID,
+		"path":       "index.html",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("holder acquire expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+	holderSet := authV2Rdb.HGet(context.Background(), lockV2Key(teamID, project.ID, "index.html"), "owner_set").Val()
+
+	// Non-holder force release succeeds and cleans the actual holder's set.
+	forceResp, forceBody := teamJSON(t, http.MethodPost, "/api/teams/"+teamID+"/locks/release", map[string]any{
+		"project_id": project.ID,
+		"path":       "index.html",
+		"force":      true,
+	}, other, nil)
+	if forceResp.StatusCode != http.StatusOK {
+		t.Fatalf("force release expected 200, got %d body=%s", forceResp.StatusCode, forceBody)
+	}
+	exists, err := authV2Rdb.Exists(context.Background(), lockV2Key(teamID, project.ID, "index.html")).Result()
+	if err != nil || exists != 0 {
+		t.Fatalf("force-released lock should be gone: exists=%d err=%v", exists, err)
+	}
+	member := lockMember(project.ID, "index.html")
+	stillMember, err := authV2Rdb.SIsMember(context.Background(), holderSet, member).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillMember {
+		t.Fatalf("holder set %q still holds member after force release", holderSet)
+	}
+}
+
 func TestV2LockListIsTeamScoped(t *testing.T) {
 	setupAuthV2TestServer(t)
 	cleanupAuthV2Keys(t)
