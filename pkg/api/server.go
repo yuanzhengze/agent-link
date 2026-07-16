@@ -163,6 +163,9 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("DELETE /api/teams/{team_id}/members/{user_id}", s.requireIdentity(s.requireTeamRole(auth.RoleOwner, auth.RoleAdmin)(http.HandlerFunc(s.handleRemoveTeamMember))))
 	s.mux.Handle("POST /api/teams/{team_id}/transfer-owner", s.requireIdentity(s.requireTeamRole(auth.RoleOwner)(http.HandlerFunc(s.handleTransferTeamOwner))))
 	s.mux.Handle("POST /api/teams/{team_id}/leave", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleLeaveTeam))))
+	s.mux.Handle("POST /api/teams/{team_id}/locks/acquire", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleLockAcquireV2)))))
+	s.mux.Handle("POST /api/teams/{team_id}/locks/release", s.requireIdentity(s.requireTeamRole()(s.requireActorSession(http.HandlerFunc(s.handleLockReleaseV2)))))
+	s.mux.Handle("GET /api/teams/{team_id}/locks", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleLockListV2))))
 
 	hub := NewHub(opts.Redis)
 	hub.previewToken = s.previewToken

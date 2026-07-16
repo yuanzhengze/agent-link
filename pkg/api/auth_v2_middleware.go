@@ -143,6 +143,35 @@ func (s *Server) authenticateWeb(w http.ResponseWriter, r *http.Request) (contex
 	return ctx, nil
 }
 
+// requireActorSession enriches the request Actor with a validated agent
+// session name and requires the result to carry a non-empty session. Web
+// actors already carry the "gui" session from authenticateWeb; device actors
+// must supply a valid X-Agentlink-Session header. This middleware runs after
+// requireTeamRole so it sees the team-scoped Actor.
+func (s *Server) requireActorSession(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := ActorFromContext(r.Context())
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if actor.ClientType == "device" {
+			session := strings.TrimSpace(r.Header.Get("X-Agentlink-Session"))
+			if !deviceNameRE.MatchString(session) {
+				writeError(w, http.StatusBadRequest, "invalid agent session")
+				return
+			}
+			actor.SessionName = session
+			r = r.WithContext(context.WithValue(r.Context(), contextKeyActor, actor))
+		}
+		if actor.SessionName == "" {
+			writeError(w, http.StatusBadRequest, "missing agent session")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) enforceMustChangePassword(w http.ResponseWriter, r *http.Request, user auth.User, actor auth.Actor) error {
 	if !user.MustChangePassword {
 		return nil
