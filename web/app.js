@@ -31,6 +31,8 @@
 
     currentUsername: document.getElementById("current-username"),
     btnLogout: document.getElementById("btn-logout"),
+    btnCreateTeam: document.getElementById("btn-create-team"),
+    btnJoinTeamTop: document.getElementById("btn-join-team-top"),
   };
 
   // ---- view state --------------------------------------------------------
@@ -129,6 +131,9 @@
   el.btnLogout.addEventListener("click", function () {
     auth.logout();
   });
+
+  if (el.btnCreateTeam) el.btnCreateTeam.addEventListener("click", showOnboarding);
+  if (el.btnJoinTeamTop) el.btnJoinTeamTop.addEventListener("click", showOnboarding);
 
   // ---- orchestration -----------------------------------------------------
 
