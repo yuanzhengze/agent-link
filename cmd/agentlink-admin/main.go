@@ -13,7 +13,16 @@ import (
 	"github.com/team/agentlink/pkg/redis"
 )
 
-const redisOpTimeout = 30 * time.Second
+const (
+	redisOpTimeout = 30 * time.Second
+
+	// exitPasswordDeliveryFailed means the reset committed but the temporary
+	// password could not be reliably delivered. Callers must not retry it
+	// automatically because another reset would invalidate that password.
+	exitPasswordDeliveryFailed = 3
+)
+
+const passwordDeliveryFailedWarning = "password was reset but temporary password delivery failed; DO NOT RETRY AUTOMATICALLY; run a new reset manually"
 
 type systemClock struct{}
 
@@ -50,7 +59,7 @@ func execute(
 	}
 	rdb, closer, err := connect(addr)
 	if err != nil {
-		fmt.Fprintf(stderr, "redis connection failed: %v\n", err)
+		fmt.Fprintln(stderr, "redis connection failed; check REDIS_ADDR and Redis health")
 		return 1
 	}
 
@@ -109,7 +118,12 @@ func resetPassword(username string, stdout, stderr io.Writer, rdb *redis.Client)
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "temporary_password=%s\n", tempPassword)
+	output := "temporary_password=" + tempPassword + "\n"
+	n, err := io.WriteString(stdout, output)
+	if err != nil || n != len(output) {
+		fmt.Fprintln(stderr, passwordDeliveryFailedWarning)
+		return exitPasswordDeliveryFailed
+	}
 	return 0
 }
 
@@ -120,7 +134,7 @@ func friendlyResetError(err error) string {
 	if msg := normalizeUsernameError(err); msg != "" {
 		return msg
 	}
-	return "reset password failed; check Redis connectivity and data integrity"
+	return "reset password failed; check host and Redis health"
 }
 
 func normalizeUsernameError(err error) string {
@@ -137,5 +151,11 @@ func printUsage(w io.Writer) {
 
 Usage:
   agentlink-admin user reset-password <username>
+
+Exit codes:
+  0  password reset and temporary password delivered
+  1  Redis connection or reset failed
+  2  usage error or unknown command
+  3  password reset but delivery failed; DO NOT RETRY AUTOMATICALLY
 `)
 }

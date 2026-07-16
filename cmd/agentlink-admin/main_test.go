@@ -25,6 +25,33 @@ type closeFunc func() error
 
 func (f closeFunc) Close() error { return f() }
 
+type recordingWriter struct {
+	writes int
+	data   bytes.Buffer
+}
+
+func (w *recordingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return w.data.Write(p)
+}
+
+func (w *recordingWriter) String() string { return w.data.String() }
+
+type controlledFailureWriter struct {
+	writes    int
+	attempted string
+	short     bool
+}
+
+func (w *controlledFailureWriter) Write(p []byte) (int, error) {
+	w.writes++
+	w.attempted = string(p)
+	if w.short {
+		return len(p) - 1, nil
+	}
+	return 0, errors.New("controlled stdout failure")
+}
+
 func newTestRedis(t *testing.T) *redis.Client {
 	t.Helper()
 	rdb, err := redis.NewClient("localhost:6379")
@@ -140,10 +167,14 @@ func TestRunResetPasswordSuccess(t *testing.T) {
 	beforeVersion := user.PasswordVersion
 	oldPassword := "correct horse battery staple"
 
-	var stdout, stderr bytes.Buffer
+	var stdout recordingWriter
+	var stderr bytes.Buffer
 	code := run([]string{"user", "reset-password", username}, &stdout, &stderr, rdb)
 	if code != 0 {
 		t.Fatalf("run() code = %d stderr = %q; want 0", code, stderr.String())
+	}
+	if stdout.writes != 1 {
+		t.Fatalf("stdout writes = %d; want exactly 1", stdout.writes)
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q; want empty", stderr.String())
@@ -188,6 +219,69 @@ func TestRunResetPasswordSuccess(t *testing.T) {
 	}
 	if !loginResult.User.MustChangePassword {
 		t.Fatal("login with temp password must require password change")
+	}
+}
+
+func TestRunResetPasswordWriteErrorReturnsPartialSuccess(t *testing.T) {
+	assertPasswordDeliveryFailure(t, &controlledFailureWriter{})
+}
+
+func TestRunResetPasswordShortWriteReturnsPartialSuccess(t *testing.T) {
+	assertPasswordDeliveryFailure(t, &controlledFailureWriter{short: true})
+}
+
+func assertPasswordDeliveryFailure(t *testing.T, stdout *controlledFailureWriter) {
+	t.Helper()
+	svc, store, rdb, user, username, web, device := setupUserWithSessions(t)
+	before, err := store.UserByID(context.Background(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+
+	code := run([]string{"user", "reset-password", username}, stdout, &stderr, rdb)
+
+	if code != 3 {
+		t.Fatalf("run() code = %d stderr = %q; want password-delivery exit 3", code, stderr.String())
+	}
+	if stdout.writes != 1 {
+		t.Fatalf("stdout writes = %d; want exactly 1 without retry", stdout.writes)
+	}
+	tempPassword := parseTemporaryPassword(t, stdout.attempted)
+	if !strings.Contains(stderr.String(), "password was reset but temporary password delivery failed") ||
+		!strings.Contains(stderr.String(), "DO NOT RETRY AUTOMATICALLY") {
+		t.Fatalf("stderr = %q; want partial-success and no-retry warning", stderr.String())
+	}
+	if strings.Contains(stderr.String(), tempPassword) ||
+		strings.Contains(stderr.String(), "temporary_password") {
+		t.Fatalf("stderr leaked temporary password: %q", stderr.String())
+	}
+	assertNoSecretLeak(t, stderr.String())
+
+	after, err := store.UserByID(context.Background(), user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.PasswordVersion != before.PasswordVersion+1 {
+		t.Fatalf("password_version = %d; want exactly %d", after.PasswordVersion, before.PasswordVersion+1)
+	}
+	if !after.MustChangePassword {
+		t.Fatal("must_change_password not set after delivery failure")
+	}
+	if after.PasswordPHC == before.PasswordPHC {
+		t.Fatal("password hash did not change before delivery failure")
+	}
+	if ok, err := auth.VerifyPassword(after.PasswordPHC, tempPassword); err != nil || !ok {
+		t.Fatalf("temporary password verify = %v, %v; want true, nil", ok, err)
+	}
+	if ok, err := auth.VerifyPassword(after.PasswordPHC, "correct horse battery staple"); err != nil || ok {
+		t.Fatalf("old password verify = %v, %v; want false, nil", ok, err)
+	}
+	if _, _, err := svc.ResolveWebSession(context.Background(), web.SessionSecret); !errors.Is(err, auth.ErrSessionExpired) {
+		t.Fatalf("web session still valid after delivery failure: %v", err)
+	}
+	if _, _, err := svc.ResolveDeviceSession(context.Background(), device.DeviceCredential); !errors.Is(err, auth.ErrSessionExpired) {
+		t.Fatalf("device session still valid after delivery failure: %v", err)
 	}
 }
 
@@ -408,6 +502,93 @@ func TestExecuteCloseFailurePreservesRunFailureCode(t *testing.T) {
 	assertNoSecretLeak(t, stderr.String())
 }
 
+func TestExecuteForwardsConfiguredRedisAddr(t *testing.T) {
+	_, _, rdb, _, username, _, _ := setupUserWithSessions(t)
+	const configuredAddr = "redis.internal.example:6380"
+	var connectedAddr string
+	connect := func(addr string) (*redis.Client, io.Closer, error) {
+		connectedAddr = addr
+		return rdb, closeFunc(func() error { return nil }), nil
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := execute(
+		[]string{"user", "reset-password", username},
+		&stdout,
+		&stderr,
+		func(key string) string {
+			if key != "REDIS_ADDR" {
+				t.Fatalf("getenv key = %q; want REDIS_ADDR", key)
+			}
+			return configuredAddr
+		},
+		connect,
+	)
+
+	if code != 0 {
+		t.Fatalf("execute() code = %d stderr = %q; want 0", code, stderr.String())
+	}
+	if connectedAddr != configuredAddr {
+		t.Fatalf("connected address = %q; want %q", connectedAddr, configuredAddr)
+	}
+}
+
+func TestExecuteConnectionFactoryErrorIsSafe(t *testing.T) {
+	_, store, _, user, username, web, device := setupUserWithSessions(t)
+	ctx := context.Background()
+	beforeUser, err := store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leakedValues := []string{
+		beforeUser.PasswordPHC,
+		"agentlink:v2:user:" + user.ID,
+		web.SessionSecret,
+		device.DeviceCredential,
+	}
+	var connectCalls int
+	connect := func(string) (*redis.Client, io.Closer, error) {
+		connectCalls++
+		return nil, nil, errors.New(strings.Join(leakedValues, " "))
+	}
+	var stdout, stderr bytes.Buffer
+
+	code := execute(
+		[]string{"user", "reset-password", username},
+		&stdout,
+		&stderr,
+		func(string) string { return "redis.invalid:6399" },
+		connect,
+	)
+
+	if code != 1 {
+		t.Fatalf("execute() code = %d; want 1", code)
+	}
+	if connectCalls != 1 {
+		t.Fatalf("connect calls = %d; want 1", connectCalls)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q; want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "redis connection failed") {
+		t.Fatalf("stderr = %q; want connection failure", stderr.String())
+	}
+	for _, leaked := range leakedValues {
+		if strings.Contains(stderr.String(), leaked) {
+			t.Fatalf("stderr leaked %q: %q", leaked, stderr.String())
+		}
+	}
+	assertNoSecretLeak(t, stderr.String())
+
+	afterUser, err := store.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterUser, beforeUser) {
+		t.Fatalf("user changed after connection failure: before=%+v after=%+v", beforeUser, afterUser)
+	}
+}
+
 func TestRunResetPasswordLuaPreflightFailureIsAtomic(t *testing.T) {
 	_, store, rdb, user, username, web, device := setupUserWithSessions(t)
 	ctx := context.Background()
@@ -449,7 +630,7 @@ func TestRunResetPasswordLuaPreflightFailureIsAtomic(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q; want empty on atomic failure", stdout.String())
 	}
-	if got := stderr.String(); got != "reset password failed; check Redis connectivity and data integrity\n" {
+	if got := stderr.String(); got != "reset password failed; check host and Redis health\n" {
 		t.Fatalf("stderr = %q; want generic runtime error", got)
 	}
 	assertNoSecretLeak(t, stderr.String())
@@ -501,6 +682,15 @@ func TestRunResetPasswordStdoutFormat(t *testing.T) {
 	}
 	if utf8.RuneCountInString(strings.TrimSuffix(stdout.String(), "\n")) == 0 {
 		t.Fatal("stdout empty after trim")
+	}
+}
+
+func TestUsageDocumentsPasswordDeliveryFailureExitCode(t *testing.T) {
+	var usage bytes.Buffer
+	printUsage(&usage)
+	if !strings.Contains(usage.String(), "3") ||
+		!strings.Contains(usage.String(), "DO NOT RETRY AUTOMATICALLY") {
+		t.Fatalf("usage does not document password-delivery exit code 3: %q", usage.String())
 	}
 }
 
