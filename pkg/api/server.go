@@ -33,17 +33,19 @@ type ServerOptions struct {
 }
 
 type Server struct {
-	rdb              *redis.Client
-	registerPassword string
-	dataDir          string
-	mux              *http.ServeMux
-	srv              *http.Server
-	hub              Broadcaster
-	projMu           sync.Map
-	previewToken     string
-	authService      *auth.Service
-	cookieSecure     bool
-	publicOrigin     string
+	rdb                   *redis.Client
+	registerPassword      string
+	dataDir               string
+	mux                   *http.ServeMux
+	srv                   *http.Server
+	hub                   Broadcaster
+	projMu                sync.Map
+	previewToken          string
+	authService           *auth.Service
+	cookieSecure          bool
+	publicOrigin          string
+	projectIDGenerator    func() string
+	projectGitInitializer func(string) (string, error)
 }
 
 // generatePreviewToken returns a random 32-byte hex-encoded token used to
@@ -100,14 +102,16 @@ func NewWithOptions(opts ServerOptions) *Server {
 	authService := auth.NewService(store, realClock{})
 
 	s := &Server{
-		rdb:              opts.Redis,
-		registerPassword: opts.RegisterPassword,
-		dataDir:          opts.DataDir,
-		mux:              http.NewServeMux(),
-		previewToken:     previewToken,
-		authService:      authService,
-		cookieSecure:     opts.CookieSecure,
-		publicOrigin:     publicOrigin,
+		rdb:                   opts.Redis,
+		registerPassword:      opts.RegisterPassword,
+		dataDir:               opts.DataDir,
+		mux:                   http.NewServeMux(),
+		previewToken:          previewToken,
+		authService:           authService,
+		cookieSecure:          opts.CookieSecure,
+		publicOrigin:          publicOrigin,
+		projectIDGenerator:    generateID,
+		projectGitInitializer: initializeProjectGitV2,
 	}
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
@@ -148,6 +152,8 @@ func NewWithOptions(opts ServerOptions) *Server {
 	s.mux.Handle("GET /api/teams", s.requireIdentity(http.HandlerFunc(s.handleListTeams)))
 	s.mux.Handle("POST /api/teams", s.requireIdentity(http.HandlerFunc(s.handleCreateTeam)))
 	s.mux.Handle("POST /api/teams/join", s.requireIdentity(http.HandlerFunc(s.handleJoinTeam)))
+	s.mux.Handle("POST /api/teams/{team_id}/projects", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleCreateProjectV2))))
+	s.mux.Handle("GET /api/teams/{team_id}/projects", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleListProjectsV2))))
 	s.mux.Handle("GET /api/teams/{team_id}", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleGetTeam))))
 	s.mux.Handle("GET /api/teams/{team_id}/members", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleListTeamMembers))))
 	s.mux.Handle("POST /api/teams/{team_id}/invite/rotate", s.requireIdentity(s.requireTeamRole(auth.RoleOwner, auth.RoleAdmin)(http.HandlerFunc(s.handleRotateTeamInvite))))
