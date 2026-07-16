@@ -287,6 +287,20 @@ func TestV2ProjectPersistReplayUsesCreationToken(t *testing.T) {
 		t.Fatalf("replayed project indexed=%v err=%v; want true", indexed, err)
 	}
 
+	// A same-token replay whose head_commit has since advanced (via apply) is
+	// still an idempotent replay: it must not be treated as a collision and must
+	// never overwrite the current head_commit.
+	advancedHead := project
+	advancedHead.HeadCommit = strings.Repeat("c", 40)
+	replayAdvancedHead, err := runCreateProjectV2ScriptForTest(
+		context.Background(),
+		advancedHead,
+		creationToken,
+	)
+	if err != nil || replayAdvancedHead != 2 {
+		t.Fatalf("same-token advanced-head replay = %d, %v; want idempotent result 2", replayAdvancedHead, err)
+	}
+
 	differentToken, err := runCreateProjectV2ScriptForTest(
 		context.Background(),
 		project,
@@ -302,8 +316,8 @@ func TestV2ProjectPersistReplayUsesCreationToken(t *testing.T) {
 		differentPayload,
 		creationToken,
 	)
-	if err != nil || sameTokenDifferentPayload != 0 {
-		t.Fatalf("different-payload persist = %d, %v; want collision 0", sameTokenDifferentPayload, err)
+	if err != nil || sameTokenDifferentPayload != 3 {
+		t.Fatalf("same-token immutable mismatch = %d, %v; want corrupt result 3", sameTokenDifferentPayload, err)
 	}
 
 	afterFields, err := authV2Rdb.HGetAll(context.Background(), projectV2Key(project.ID)).Result()
@@ -846,7 +860,7 @@ func TestV2ProjectBodyValidation(t *testing.T) {
 	}
 }
 
-func TestV2ProjectRedisTypeErrorsAreAtomicAndCleanDirectories(t *testing.T) {
+func TestV2ProjectRedisTypeErrorsAreAtomicAndPreserveDirectories(t *testing.T) {
 	for testIndex, testCase := range []struct {
 		name      string
 		corrupt   func(t *testing.T, teamID, projectID string)
@@ -910,8 +924,12 @@ func TestV2ProjectRedisTypeErrorsAreAtomicAndCleanDirectories(t *testing.T) {
 				t.Fatalf("wrong Redis type expected 500, got %d body=%s", resp.StatusCode, body)
 			}
 			testCase.assertion(t, teamID, projectID)
-			if _, err := os.Stat(authV2Srv.projectDirV2(teamID, projectID)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("failed project directory must be removed, stat error = %v", err)
+			// A Redis preflight error is uncertain: go-redis may have applied a
+			// write on a lost-reply retry, so the work tree is preserved rather
+			// than blind-deleted. No metadata/index is written, so an orphan
+			// directory is the safe outcome here.
+			if _, err := os.Stat(authV2Srv.projectDirV2(teamID, projectID)); err != nil {
+				t.Fatalf("wrong-type project directory must be preserved, stat error = %v", err)
 			}
 		})
 	}
@@ -1509,6 +1527,156 @@ func TestV2ProjectMatchingHashWithBrokenIndexPreservesTree(t *testing.T) {
 			}
 			testCase.assert(t, inspector, indexKey)
 		})
+	}
+}
+
+func TestV2ProjectReplayAfterHeadAdvancedReturnsCurrentHead(t *testing.T) {
+	var inspector *goredis.Client
+	teamID := "tm_project_head_advanced"
+	projectID := projectV2TestID(560)
+	creationToken := strings.Repeat("6", 32)
+	advancedHead := strings.Repeat("d", 40)
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{
+				fault: projectV2CreateScriptFailAfter,
+				after: func() {
+					// Simulate a concurrent apply advancing head_commit after the
+					// initial create committed but before its reply arrived.
+					if err := inspector.HSet(
+						context.Background(),
+						projectV2Key(projectID),
+						"head_commit", advancedHead,
+					).Err(); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		},
+	}
+	srv, _, gotInspector := newProjectV2HookedStore(t, hook)
+	inspector = gotInspector
+	srv.projectIDGenerator = func() string { return projectID }
+	srv.projectTokenGenerator = func() (string, error) { return creationToken, nil }
+
+	project, err := srv.createTeamProjectV2(context.Background(), teamID, "Head advanced project")
+	if err != nil {
+		t.Fatalf("replay after advanced head should recover: %v", err)
+	}
+	if project.HeadCommit != advancedHead {
+		t.Fatalf("returned head_commit = %q; want current %q", project.HeadCommit, advancedHead)
+	}
+	if calls := hook.createCallCount(); calls != 2 {
+		t.Fatalf("create script calls = %d; want initial and idempotent settlement", calls)
+	}
+	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+		t.Fatalf("replay must preserve work tree: %v", err)
+	}
+	fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil || fields["head_commit"] != advancedHead || fields["creation_token"] != creationToken {
+		t.Fatalf("stored metadata = %v err=%v; head must stay advanced", fields, err)
+	}
+	indexed, err := inspector.SIsMember(context.Background(), teamProjectsV2Key(teamID), projectID).Result()
+	if err != nil || !indexed {
+		t.Fatalf("replayed project indexed=%v err=%v; want true", indexed, err)
+	}
+}
+
+func TestV2ProjectSameTokenImmutableMismatchPreservesTree(t *testing.T) {
+	var inspector *goredis.Client
+	teamID := "tm_project_immutable_mismatch"
+	projectID := projectV2TestID(561)
+	creationToken := strings.Repeat("7", 32)
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{
+				fault: projectV2CreateScriptFailAfter,
+				after: func() {
+					// Corrupt an immutable field (name) after the initial write so
+					// the settlement re-run sees the same token but a different
+					// identity. This must never be treated as a reusable collision.
+					if err := inspector.HSet(
+						context.Background(),
+						projectV2Key(projectID),
+						"name", "Tampered immutable name",
+					).Err(); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		},
+	}
+	srv, _, gotInspector := newProjectV2HookedStore(t, hook)
+	inspector = gotInspector
+	srv.projectIDGenerator = func() string { return projectID }
+	srv.projectTokenGenerator = func() (string, error) { return creationToken, nil }
+
+	if _, err := srv.createTeamProjectV2(
+		context.Background(), teamID, "Original immutable name",
+	); !errors.Is(err, errProjectStoreInconsistent) {
+		t.Fatalf("same-token immutable mismatch error = %v; want store error", err)
+	}
+	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+		t.Fatalf("immutable mismatch must preserve work tree: %v", err)
+	}
+	fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil || fields["name"] != "Tampered immutable name" || fields["creation_token"] != creationToken {
+		t.Fatalf("mismatch must not modify metadata: fields=%v err=%v", fields, err)
+	}
+}
+
+func TestV2ProjectFinalRedisErrorAfterMatchingWritePreservesTree(t *testing.T) {
+	var inspector *goredis.Client
+	teamID := "tm_project_final_redis_error"
+	projectID := projectV2TestID(562)
+	creationToken := strings.Repeat("8", 32)
+	indexKey := teamProjectsV2Key(teamID)
+	hook := &projectV2UncertainResultHook{
+		createSteps: []projectV2CreateScriptStep{
+			{
+				fault: projectV2CreateScriptFailAfter,
+				after: func() {
+					// After the matching write, corrupt the team index to a wrong
+					// type so the settlement re-run returns a genuine WRONGTYPE
+					// preflight error (not a lost reply). The tree must survive.
+					if err := inspector.Del(context.Background(), indexKey).Err(); err != nil {
+						t.Fatal(err)
+					}
+					if err := inspector.Set(context.Background(), indexKey, "corrupt", 0).Err(); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			// No fault on the settlement re-run: it must hit Redis and surface a
+			// real preflight error, exercising the never-blind-delete path.
+		},
+	}
+	srv, _, gotInspector := newProjectV2HookedStore(t, hook)
+	inspector = gotInspector
+	srv.projectIDGenerator = func() string { return projectID }
+	srv.projectTokenGenerator = func() (string, error) { return creationToken, nil }
+
+	if _, err := srv.createTeamProjectV2(
+		context.Background(), teamID, "Final error project",
+	); !errors.Is(err, errProjectStoreInconsistent) {
+		t.Fatalf("final Redis error should surface as store error: %v", err)
+	}
+	if calls := hook.createCallCount(); calls != 2 {
+		t.Fatalf("create script calls = %d; want initial write and settlement re-run", calls)
+	}
+	if _, err := os.Stat(srv.projectDirV2(teamID, projectID)); err != nil {
+		t.Fatalf("final Redis error must preserve matching work tree: %v", err)
+	}
+	fields, err := inspector.HGetAll(context.Background(), projectV2Key(projectID)).Result()
+	if err != nil ||
+		fields["id"] != projectID ||
+		fields["team_id"] != teamID ||
+		fields["creation_token"] != creationToken {
+		t.Fatalf("matching metadata must remain intact: fields=%v err=%v", fields, err)
+	}
+	value, err := inspector.Get(context.Background(), indexKey).Result()
+	if err != nil || value != "corrupt" {
+		t.Fatalf("wrong-type index changed: value=%q err=%v", value, err)
 	}
 }
 

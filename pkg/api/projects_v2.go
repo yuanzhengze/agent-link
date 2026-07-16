@@ -42,16 +42,24 @@ if index_exists == 0 and index_type ~= 'none' then
 end
 if project_exists == 1 then
   local existing = redis.call('HMGET', KEYS[1],
-    'id', 'team_id', 'name', 'created_at', 'head_commit', 'creation_token')
-  if existing[1] == ARGV[1]
-    and existing[2] == ARGV[2]
-    and existing[3] == ARGV[3]
-    and existing[4] == ARGV[4]
-    and existing[5] == ARGV[5]
-    and existing[6] == ARGV[6] then
-    redis.call('SADD', KEYS[2], ARGV[1])
-    return 2
+    'id', 'team_id', 'name', 'created_at', 'creation_token')
+  if existing[5] == ARGV[6] then
+    -- Same creation token: this is our own attempt being replayed (e.g. a
+    -- lost reply retried by the client). head_commit is mutable and may have
+    -- already advanced via apply, so it is deliberately excluded from the
+    -- identity check and never overwritten here.
+    if existing[1] == ARGV[1]
+      and existing[2] == ARGV[2]
+      and existing[3] == ARGV[3]
+      and existing[4] == ARGV[4] then
+      redis.call('SADD', KEYS[2], ARGV[1])
+      return 2
+    end
+    -- Same token but a different immutable identity means the stored record is
+    -- corrupt. Never mutate it and never treat it as a reusable id collision.
+    return 3
   end
+  -- A different token means an independent project already owns this id.
   return 0
 end
 
@@ -91,8 +99,13 @@ end
 if existing[1] ~= ARGV[1]
   or existing[2] ~= ARGV[2]
   or existing[3] ~= ARGV[3]
-  or existing[4] ~= ARGV[4]
-  or existing[5] ~= ARGV[5] then
+  or existing[4] ~= ARGV[4] then
+  return 4
+end
+local head = existing[5]
+if not head
+  or not (string.len(head) == 40 or string.len(head) == 64)
+  or not string.match(head, '^[0-9a-f]+$') then
   return 4
 end
 if index_type ~= 'set' then
@@ -129,6 +142,19 @@ const (
 	projectPersistenceUnresolved projectPersistenceSettlement = iota
 	projectPersistenceSettled
 	projectPersistenceCollision
+)
+
+// projectPersistOutcome is the deterministic result of running the create
+// script. Any transport/Redis error is reported separately and treated as
+// uncertain, because a lost reply may hide an already-applied internal retry.
+type projectPersistOutcome int
+
+const (
+	projectPersistUncertain projectPersistOutcome = iota
+	projectPersistCreated
+	projectPersistReplayed
+	projectPersistCollided
+	projectPersistCorrupt
 )
 
 func (s *Server) handleCreateProjectV2(w http.ResponseWriter, r *http.Request) {
@@ -240,33 +266,53 @@ func (s *Server) createTeamProjectV2(ctx context.Context, teamID, name string) (
 			CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 			HeadCommit: headCommit,
 		}
-		err = s.persistTeamProjectV2(ctx, project, creationToken)
-		switch {
-		case err == nil:
-			return project, nil
-		case errors.Is(err, errProjectIDCollision):
-			removeReservedProjectDirV2(dir)
-			continue
-		case projectPersistenceMayBeUncertain(err):
+		outcome, err := s.persistTeamProjectV2(ctx, project, creationToken)
+		if err != nil {
+			// Any transport/Redis error is uncertain: go-redis may have already
+			// applied the write on a retry whose reply was lost, so we must never
+			// blind-delete the work tree. Settle deterministically instead.
 			settlement, settlementErr := s.settleTeamProjectPersistenceV2(project, creationToken)
 			switch settlement {
 			case projectPersistenceSettled:
-				return project, nil
+				return s.reloadPersistedProjectV2(project)
 			case projectPersistenceCollision:
 				removeReservedProjectDirV2(dir)
 				continue
-			case projectPersistenceUnresolved:
+			default: // projectPersistenceUnresolved: preserve the work tree.
 				if settlementErr != nil {
 					return TeamProject{}, settlementErr
 				}
 				return TeamProject{}, err
 			}
-		default:
+		}
+
+		switch outcome {
+		case projectPersistCreated:
+			return project, nil
+		case projectPersistReplayed:
+			// A same-token replay may have found an already-advanced head_commit;
+			// reload the authoritative record instead of returning a stale head.
+			return s.reloadPersistedProjectV2(project)
+		case projectPersistCollided:
 			removeReservedProjectDirV2(dir)
-			return TeamProject{}, err
+			continue
+		default: // projectPersistCorrupt: same token, different immutable identity.
+			return TeamProject{}, fmt.Errorf(
+				"%w: project metadata mismatch on matching creation token",
+				errProjectStoreInconsistent,
+			)
 		}
 	}
 	return TeamProject{}, errProjectIDExhausted
+}
+
+// reloadPersistedProjectV2 reads the authoritative project record after a
+// confirmed create/replay so the caller returns the current head_commit rather
+// than the value it attempted to write.
+func (s *Server) reloadPersistedProjectV2(project TeamProject) (TeamProject, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), projectV2VerifyTimeout)
+	defer cancel()
+	return s.loadTeamProject(ctx, project.TeamID, project.ID)
 }
 
 func reserveProjectDirV2(dir string) error {
@@ -340,7 +386,7 @@ func initializeProjectGitV2(dir string) (string, error) {
 	return headCommit, nil
 }
 
-func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject, creationToken string) error {
+func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject, creationToken string) (projectPersistOutcome, error) {
 	result, err := createTeamProjectV2Script.Run(
 		ctx,
 		s.rdb,
@@ -353,21 +399,20 @@ func (s *Server) persistTeamProjectV2(ctx context.Context, project TeamProject, 
 		creationToken,
 	).Int64()
 	if err != nil {
-		return fmt.Errorf("%w: persist project: %w", errProjectStoreInconsistent, err)
+		return projectPersistUncertain, fmt.Errorf("%w: persist project: %w", errProjectStoreInconsistent, err)
 	}
 	switch result {
-	case 1, 2:
-		return nil
+	case 1:
+		return projectPersistCreated, nil
+	case 2:
+		return projectPersistReplayed, nil
+	case 3:
+		return projectPersistCorrupt, nil
 	case 0:
-		return errProjectIDCollision
+		return projectPersistCollided, nil
 	default:
-		return fmt.Errorf("%w: unexpected create result %d", errProjectStoreInconsistent, result)
+		return projectPersistUncertain, fmt.Errorf("%w: unexpected create result %d", errProjectStoreInconsistent, result)
 	}
-}
-
-func projectPersistenceMayBeUncertain(err error) bool {
-	var redisErr goredis.Error
-	return !errors.As(err, &redisErr)
 }
 
 func (s *Server) settleTeamProjectPersistenceV2(
@@ -375,18 +420,26 @@ func (s *Server) settleTeamProjectPersistenceV2(
 	creationToken string,
 ) (projectPersistenceSettlement, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), projectV2VerifyTimeout)
-	err := s.persistTeamProjectV2(ctx, project, creationToken)
+	outcome, err := s.persistTeamProjectV2(ctx, project, creationToken)
 	cancel()
 
-	switch {
-	case err == nil:
-		return projectPersistenceSettled, nil
-	case errors.Is(err, errProjectIDCollision):
-		return projectPersistenceCollision, nil
-	case !projectPersistenceMayBeUncertain(err):
-		return projectPersistenceUnresolved, err
+	if err == nil {
+		switch outcome {
+		case projectPersistCreated, projectPersistReplayed:
+			return projectPersistenceSettled, nil
+		case projectPersistCollided:
+			return projectPersistenceCollision, nil
+		default: // projectPersistCorrupt: same token, different immutable identity.
+			return projectPersistenceUnresolved, fmt.Errorf(
+				"%w: project metadata mismatch on matching creation token",
+				errProjectStoreInconsistent,
+			)
+		}
 	}
 
+	// The settlement re-run itself failed. Because a lost reply could still hide
+	// a successful write, never delete here; fall back to a single read-only
+	// atomic verification and only treat a different-token record as a collision.
 	verification, verifyErr := s.verifyTeamProjectPersistenceV2(project, creationToken)
 	if verifyErr != nil {
 		return projectPersistenceUnresolved, verifyErr
