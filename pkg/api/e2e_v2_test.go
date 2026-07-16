@@ -298,3 +298,44 @@ func TestE2EV2WebAndDeviceWSStayInsideTeam(t *testing.T) {
 	expectNoMessage(t, webConn, 400*time.Millisecond)
 	expectNoMessage(t, devConn, 400*time.Millisecond)
 }
+
+// TestE2EV2BrowserJourney mirrors the user-visible browser flow end to end over
+// Cookie+CSRF: Alice registers and creates a team, Bob registers and joins with
+// the invite, Bob locks and applies a file, and Alice previews the result.
+func TestE2EV2BrowserJourney(t *testing.T) {
+	setupAuthV2TestServer(t)
+	cleanupAuthV2Keys(t)
+
+	alice := registerBrowserUser(t, "journeyalice", "correct horse 123")
+	team, invite := createBrowserTeam(t, alice, "Journey Team")
+	bob := registerBrowserUser(t, "journeybob", "correct battery 456")
+	joinBrowserTeam(t, bob, team.ID, invite)
+
+	// Alice creates a project; Bob (same team) sees and edits it.
+	project := createProjectV2HTTP(t, alice.Session, team.ID, "Prototype")
+	if got := listProjectsV2HTTP(t, bob.Session, team.ID); len(got) != 1 || got[0].ID != project.ID {
+		t.Fatalf("bob project list = %+v; want [%s]", got, project.ID)
+	}
+
+	// Bob locks + applies index.html through the same Cookie/CSRF path the GUI uses.
+	seedFileV2(t, bob.Session, team.ID, project.ID, "index.html", "<h1>joined</h1>")
+
+	// Alice previews the committed file with live-reload injected.
+	resp, body := previewV2(t, alice.Session, team.ID, project.ID, "index.html")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("alice preview expected 200, got %d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "<h1>joined</h1>") {
+		t.Fatalf("alice preview missing bob's content: %s", body)
+	}
+
+	// A different team cannot reach the project or its preview.
+	carol := registerBrowserUser(t, "journeycarol", "correct staple 789")
+	otherTeam, _ := createBrowserTeam(t, carol, "Other Journey Team")
+	if r, tree := treeV2Web(t, carol.Session, otherTeam.ID, project.ID); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-team tree expected 404, got %d (%+v)", r.StatusCode, tree)
+	}
+	if r, b := previewV2(t, carol.Session, otherTeam.ID, project.ID, "index.html"); r.StatusCode != http.StatusNotFound {
+		t.Fatalf("cross-team preview expected 404, got %d body=%s", r.StatusCode, b)
+	}
+}
