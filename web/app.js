@@ -33,6 +33,7 @@
     btnLogout: document.getElementById("btn-logout"),
     btnCreateTeam: document.getElementById("btn-create-team"),
     btnJoinTeamTop: document.getElementById("btn-join-team-top"),
+    btnMembers: document.getElementById("btn-members"),
   };
 
   // ---- view state --------------------------------------------------------
@@ -134,6 +135,11 @@
 
   if (el.btnCreateTeam) el.btnCreateTeam.addEventListener("click", showOnboarding);
   if (el.btnJoinTeamTop) el.btnJoinTeamTop.addEventListener("click", showOnboarding);
+  if (el.btnMembers) {
+    el.btnMembers.addEventListener("click", function () {
+      if (window.CoworkTeams) window.CoworkTeams.openMembers();
+    });
+  }
 
   // ---- orchestration -----------------------------------------------------
 

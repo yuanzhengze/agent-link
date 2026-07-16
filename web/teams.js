@@ -24,6 +24,13 @@
     inviteModalCode: document.getElementById("invite-modal-code"),
     btnCopyInvite: document.getElementById("btn-copy-invite"),
     btnInviteClose: document.getElementById("btn-invite-close"),
+
+    membersModal: document.getElementById("members-modal"),
+    memberList: document.getElementById("member-list"),
+    membersError: document.getElementById("members-error"),
+    btnMembersClose: document.getElementById("btn-members-close"),
+    btnRotateInvite: document.getElementById("btn-rotate-invite"),
+    btnLeaveTeam: document.getElementById("btn-leave-team"),
   };
 
   function current() { return currentTeam; }
@@ -127,6 +134,173 @@
     el.inviteModal.classList.add("hidden");
   }
 
+  // ---- member administration --------------------------------------------
+
+  function selfID() {
+    var user = window.CoworkAuth && window.CoworkAuth.user();
+    return user ? user.id : "";
+  }
+
+  function showMembersError(msg) {
+    if (!el.membersError) return;
+    el.membersError.textContent = msg;
+    el.membersError.classList.remove("hidden");
+  }
+
+  function clearMembersError() {
+    if (!el.membersError) return;
+    el.membersError.textContent = "";
+    el.membersError.classList.add("hidden");
+  }
+
+  function openMembers() {
+    if (!currentTeam || !el.membersModal) return;
+    clearMembersError();
+    var canRotate = currentTeam.role === "owner" || currentTeam.role === "admin";
+    el.btnRotateInvite.classList.toggle("hidden", !canRotate);
+    if (currentTeam.role === "owner") {
+      el.btnLeaveTeam.textContent = "Transfer ownership before leaving";
+    } else {
+      el.btnLeaveTeam.textContent = "Leave team";
+    }
+    el.membersModal.classList.remove("hidden");
+    loadMembers();
+  }
+
+  function hideMembers() {
+    if (el.membersModal) el.membersModal.classList.add("hidden");
+  }
+
+  function loadMembers() {
+    return api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/members").then(function (res) {
+      if (!res.ok) {
+        showMembersError((res.body && res.body.error) || ("Failed to load members (" + res.status + ")"));
+        return;
+      }
+      renderMembers((res.body && res.body.members) || []);
+    });
+  }
+
+  function renderMembers(members) {
+    el.memberList.innerHTML = "";
+    members.forEach(function (m) {
+      el.memberList.appendChild(memberRow(m, currentTeam.role));
+    });
+  }
+
+  function memberRow(member, currentRole) {
+    var row = document.createElement("li");
+    row.className = "member-row";
+    var name = document.createElement("span");
+    name.className = "member-name";
+    name.textContent = member.username;
+    var role = document.createElement("span");
+    role.className = "member-role";
+    role.textContent = member.role;
+    row.appendChild(name);
+    row.appendChild(role);
+    appendAllowedActions(row, member, currentRole);
+    return row;
+  }
+
+  function appendAllowedActions(row, member, currentRole) {
+    if (member.user_id === selfID()) return;
+    var actions = document.createElement("span");
+    actions.className = "member-actions";
+
+    if (currentRole === "owner") {
+      if (member.role === "member") {
+        actions.appendChild(actionButton("Make admin", function () { changeRole(member, "admin"); }));
+      } else if (member.role === "admin") {
+        actions.appendChild(actionButton("Make member", function () { changeRole(member, "member"); }));
+      }
+      if (member.role !== "owner") {
+        actions.appendChild(actionButton("Remove", function () { removeMember(member); }, "btn-danger"));
+        actions.appendChild(actionButton("Transfer ownership", function () { transferOwner(member); }));
+      }
+    } else if (currentRole === "admin" && member.role === "member") {
+      actions.appendChild(actionButton("Remove", function () { removeMember(member); }, "btn-danger"));
+    }
+
+    if (actions.children.length > 0) row.appendChild(actions);
+  }
+
+  function actionButton(label, handler, extraClass) {
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn-secondary btn-small" + (extraClass ? " " + extraClass : "");
+    btn.textContent = label;
+    btn.addEventListener("click", handler);
+    return btn;
+  }
+
+  function changeRole(member, role) {
+    api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/members/" + encodeURIComponent(member.user_id), {
+      method: "PATCH",
+      body: JSON.stringify({ role: role })
+    }).then(afterMemberMutation);
+  }
+
+  function removeMember(member) {
+    if (!window.confirm("Remove " + member.username + " from the team?")) return;
+    api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/members/" + encodeURIComponent(member.user_id), {
+      method: "DELETE"
+    }).then(afterMemberMutation);
+  }
+
+  function transferOwner(member) {
+    if (!window.confirm("Transfer ownership to " + member.username + "? You will become an admin.")) return;
+    api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/transfer-owner", {
+      method: "POST",
+      body: JSON.stringify({ user_id: member.user_id })
+    }).then(function (res) {
+      if (res.ok) {
+        load().then(loadMembers);
+      } else {
+        showMembersError((res.body && res.body.error) || ("Transfer failed (" + res.status + ")"));
+      }
+    });
+  }
+
+  function rotateInvite() {
+    api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/invite/rotate", {
+      method: "POST"
+    }).then(function (res) {
+      if (res.ok && res.body && res.body.invite_code) {
+        showInviteModal(currentTeam.id, res.body.invite_code);
+      } else {
+        showMembersError((res.body && res.body.error) || ("Rotate failed (" + res.status + ")"));
+      }
+    });
+  }
+
+  function leaveTeam() {
+    if (currentTeam.role === "owner") {
+      showMembersError("Transfer ownership before leaving the team.");
+      return;
+    }
+    if (!window.confirm("Leave " + currentTeam.name + "?")) return;
+    api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/leave", {
+      method: "POST"
+    }).then(function (res) {
+      if (res.ok) {
+        localStorage.removeItem(LS_TEAM);
+        hideMembers();
+        load();
+      } else {
+        showMembersError((res.body && res.body.error) || ("Leave failed (" + res.status + ")"));
+      }
+    });
+  }
+
+  function afterMemberMutation(res) {
+    if (res.ok) {
+      loadMembers();
+    } else {
+      showMembersError((res.body && res.body.error) || ("Action failed (" + res.status + ")"));
+    }
+  }
+
   // ---- wiring ------------------------------------------------------------
 
   if (el.switcher) {
@@ -157,6 +331,10 @@
     });
   }
 
+  if (el.btnMembersClose) el.btnMembersClose.addEventListener("click", hideMembers);
+  if (el.btnRotateInvite) el.btnRotateInvite.addEventListener("click", rotateInvite);
+  if (el.btnLeaveTeam) el.btnLeaveTeam.addEventListener("click", leaveTeam);
+
   if (el.btnInviteClose) el.btnInviteClose.addEventListener("click", hideInviteModal);
   if (el.btnCopyInvite) {
     el.btnCopyInvite.addEventListener("click", function () {
@@ -177,5 +355,6 @@
     select: select,
     current: current,
     all: all,
+    openMembers: openMembers,
   };
 })();
