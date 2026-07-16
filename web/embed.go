@@ -7,5 +7,5 @@ package web
 
 import "embed"
 
-//go:embed index.html app.js api.js auth.js teams.js style.css
+//go:embed index.html app.js api.js auth.js teams.js dashboard.js style.css
 var FS embed.FS

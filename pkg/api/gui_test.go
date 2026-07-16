@@ -49,6 +49,34 @@ func TestServeGUINoLongerContainsTokenInputs(t *testing.T) {
 	}
 }
 
+// TestServeGUIUsesV2TeamRoutes locks in that the dashboard talks to the
+// team-scoped v2 API (via CoworkAPI's Cookie/CSRF fetch) and never attaches a
+// hand-built Authorization header or legacy token query.
+func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
+	dash := getGUIAsset(t, "/dashboard.js")
+	for _, marker := range []string{
+		"/api/teams/",
+		"/projects",
+		"/locks/acquire",
+		"/agents",
+		"/ws?project=",
+		"/preview/teams/",
+	} {
+		if !strings.Contains(dash, marker) {
+			t.Errorf("dashboard.js missing team-scoped route %q", marker)
+		}
+	}
+	for _, forbidden := range []string{
+		"Authorization",
+		"cowork_token",
+		"token=",
+	} {
+		if strings.Contains(dash, forbidden) {
+			t.Errorf("dashboard.js must not use legacy auth %q", forbidden)
+		}
+	}
+}
+
 // TestServeGUI_indexOk verifies the embedded dashboard is served at GET /
 // with no Authorization header, and that the response contains the app's
 // mount point marker.

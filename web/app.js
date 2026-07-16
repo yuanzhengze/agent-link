@@ -170,8 +170,11 @@
     showOnboarding();
   });
 
-  window.addEventListener("cowork:team-changed", function () {
+  window.addEventListener("cowork:team-changed", function (ev) {
     showApp();
+    if (window.CoworkDashboard && ev.detail && ev.detail.team) {
+      window.CoworkDashboard.activate(ev.detail.team);
+    }
   });
 
   var reauthing = false;

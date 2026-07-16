@@ -1532,7 +1532,8 @@ func skipAuth(path string) bool {
 		return true
 	}
 	switch path {
-	case "/", "/index.html", "/app.js", "/style.css":
+	case "/", "/index.html", "/style.css",
+		"/app.js", "/api.js", "/auth.js", "/teams.js", "/dashboard.js":
 		return true
 	}
 	return false
