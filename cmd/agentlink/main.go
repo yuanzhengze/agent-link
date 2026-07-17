@@ -18,6 +18,14 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "register":
+		cmdRegister(os.Args[2:])
+	case "login":
+		cmdLogin(os.Args[2:])
+	case "logout":
+		cmdLogout(os.Args[2:])
+	case "team":
+		cmdTeam(os.Args[2:])
 	case "init":
 		cmdInit(os.Args[2:])
 	case "send":
@@ -28,6 +36,8 @@ func main() {
 		cmdTask(os.Args[2:])
 	case "poll":
 		cmdPoll(os.Args[2:])
+	case "sync":
+		cmdSync(os.Args[2:])
 	case "whoami":
 		cmdWhoami()
 	case "ping":
@@ -36,6 +46,10 @@ func main() {
 		cmdList(os.Args[2:])
 	case "session":
 		cmdSession(os.Args[2:])
+	case "project":
+		cmdProject(os.Args[2:])
+	case "lock":
+		cmdLock(os.Args[2:])
 	case "attach":
 		cmdAttach(os.Args[2:])
 	case "restart":
@@ -53,13 +67,23 @@ func printUsage() {
 	fmt.Print(`agentlink - Agent communication tool
 
 Usage:
-  agentlink init --server <url> --password <pw> [--device <name>] [./path]
+  agentlink register --server <url> --username <name> [--device <name>]
+  agentlink login --server <url> --username <name> [--device <name>]
+  agentlink logout
+  agentlink team list
+  agentlink team create <name>
+  agentlink team join <team_id> <invite_code>
+  agentlink team use <team_id>
+  agentlink team members
+  agentlink team leave
+  agentlink init [--agent claude] [--no-poll] [--force] [./path]
   agentlink send [--interrupt] [--title <title>] <target> <content>
   agentlink pull [--all]
   agentlink whoami
   agentlink ping
   agentlink list [--all]
   agentlink poll
+  agentlink sync <project> <localDir>
   agentlink task send [--interrupt] [--title <title>] <target> [<task_id>] <content>
   agentlink task result <task_id> <status> <result>
   agentlink task resume <task_id> <guidance>
@@ -68,20 +92,106 @@ Usage:
   agentlink task status <task_id>
   agentlink task list
   agentlink session add|remove <name>
+  agentlink project create <name>
+  agentlink project list
+  agentlink lock acquire <project> <path>
+  agentlink lock release <project> <path>
+  agentlink lock list <project>
   agentlink attach <session>
   agentlink restart
   agentlink uninstall
 `)
 }
 
+func cmdRegister(args []string) {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	server := fs.String("server", "", "API server URL")
+	username := fs.String("username", "", "Account username")
+	device := fs.String("device", "", "Device name (default: hostname)")
+	fs.Parse(args)
+
+	if *server == "" || *username == "" {
+		fmt.Fprintln(os.Stderr, "usage: agentlink register --server <url> --username <name> [--device <name>]")
+		os.Exit(1)
+	}
+	if err := api.RunRegister(*server, *username, *device, api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLogin(args []string) {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	server := fs.String("server", "", "API server URL")
+	username := fs.String("username", "", "Account username")
+	device := fs.String("device", "", "Device name (default: hostname)")
+	fs.Parse(args)
+
+	if *server == "" || *username == "" {
+		fmt.Fprintln(os.Stderr, "usage: agentlink login --server <url> --username <name> [--device <name>]")
+		os.Exit(1)
+	}
+	if err := api.RunLogin(*server, *username, *device, api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLogout(args []string) {
+	if err := api.RunLogout(api.AccountIO{}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdTeam(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink team list|create|join|use|members|leave [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "list":
+		runTeamCmd(api.RunTeamList())
+	case "create":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team create <name>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamCreate(strings.Join(args[1:], " ")))
+	case "join":
+		if len(args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team join <team_id> <invite_code>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamJoin(args[1], args[2]))
+	case "use":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: agentlink team use <team_id>")
+			os.Exit(1)
+		}
+		runTeamCmd(api.RunTeamUse(args[1]))
+	case "members":
+		runTeamCmd(api.RunTeamMembers())
+	case "leave":
+		runTeamCmd(api.RunTeamLeave())
+	default:
+		fmt.Fprintf(os.Stderr, "unknown team subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func runTeamCmd(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
 func cmdInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	server := fs.String("server", "", "API server URL")
-	password := fs.String("password", "", "Registration password")
-	device := fs.String("device", "", "Device name (default: hostname)")
 	agent := fs.String("agent", "claude", "Agent type (default: claude)")
 	noPoll := fs.Bool("no-poll", false, "Disable auto-polling (default: false)")
-	force := fs.Bool("force", false, "Force re-register if device exists (default: false)")
+	force := fs.Bool("force", false, "Overwrite an existing workspace directory (default: false)")
 	fs.Parse(args)
 
 	path := fs.Arg(0)
@@ -90,36 +200,10 @@ func cmdInit(args []string) {
 	}
 
 	opts := &rt.InitOptions{
-		Server:   *server,
-		Password: *password,
-		Device:   *device,
-		Path:     path,
-		Agent:    *agent,
-		NoPoll:   *noPoll,
-		Force:    *force,
-	}
-
-	// When a required field is missing, run the interactive wizard on a
-	// terminal; otherwise keep the original hard error (so piped stdin in
-	// CI/scripts fails fast instead of hanging).
-	if opts.Server == "" || opts.Password == "" {
-		if rt.IsInteractive() {
-			opts.Interactive = true
-			if err := rt.PromptInitOptions(opts); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %s\n", err)
-				os.Exit(1)
-			}
-		} else {
-			fmt.Fprintln(os.Stderr, "init: --server and --password are required")
-			os.Exit(1)
-		}
-	}
-
-	// In interactive mode, show a summary and let the user back out before
-	// anything is created or registered.
-	if opts.Interactive && !rt.ConfirmInitSummary(opts) {
-		fmt.Fprintln(os.Stderr, "已取消")
-		os.Exit(1)
+		Path:   path,
+		Agent:  *agent,
+		NoPoll: *noPoll,
+		Force:  *force,
 	}
 
 	if err := rt.RunInit(opts); err != nil {
@@ -173,6 +257,20 @@ func cmdPull(args []string) {
 
 func cmdPoll(args []string) {
 	if err := rt.RunPoll(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdSync(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink sync <project> <localDir>")
+		os.Exit(1)
+	}
+	project := args[0]
+	localDir := args[1]
+
+	if err := rt.RunSync(project, localDir); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
@@ -342,6 +440,92 @@ func cmdSessionRemove(args []string) {
 	}
 	name := args[0]
 	if err := rt.RunSessionRemove(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdProject(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink project create|list [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "create":
+		cmdProjectCreate(args[1:])
+	case "list":
+		cmdProjectList()
+	default:
+		fmt.Fprintf(os.Stderr, "unknown project subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdProjectCreate(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink project create <name>")
+		os.Exit(1)
+	}
+	name := args[0]
+	if err := api.RunProjectCreate(name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdProjectList() {
+	if err := api.RunProjectList(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLock(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock acquire|release|list [args]")
+		os.Exit(1)
+	}
+	switch args[0] {
+	case "acquire":
+		cmdLockAcquire(args[1:])
+	case "release":
+		cmdLockRelease(args[1:])
+	case "list":
+		cmdLockList(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown lock subcommand: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdLockAcquire(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock acquire <project> <path>")
+		os.Exit(1)
+	}
+	if err := api.RunLockAcquire(args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLockRelease(args []string) {
+	if len(args) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock release <project> <path>")
+		os.Exit(1)
+	}
+	if err := api.RunLockRelease(args[0], args[1]); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+func cmdLockList(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: agentlink lock list <project>")
+		os.Exit(1)
+	}
+	if err := api.RunLockList(args[0]); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}

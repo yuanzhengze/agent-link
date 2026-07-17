@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,16 +10,14 @@ import (
 )
 
 func TestRunPing(t *testing.T) {
-	var authHeader string
+	var authHeader, capturedPath string
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader = r.Header.Get("Authorization")
+		capturedPath = r.URL.Path
 
 		if r.Method != "POST" {
 			t.Errorf("expected POST, got %s", r.Method)
-		}
-		if r.URL.Path != "/agents/heartbeat" {
-			t.Errorf("expected /agents/heartbeat, got %s", r.URL.Path)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -38,8 +35,11 @@ func TestRunPing(t *testing.T) {
 		if err := RunPing(); err != nil {
 			t.Fatal(err)
 		}
-		if authHeader == "" {
-			t.Error("expected auth header")
+		if capturedPath != "/api/teams/tm_alpha/agents/heartbeat" {
+			t.Errorf("expected /api/teams/tm_alpha/agents/heartbeat, got %s", capturedPath)
+		}
+		if !strings.HasPrefix(authHeader, "Device ") {
+			t.Errorf("expected Device auth, got %q", authHeader)
 		}
 	})
 
@@ -66,28 +66,25 @@ func TestRunPing(t *testing.T) {
 }
 
 func TestRunList(t *testing.T) {
-	makeAgent := func(device string, sessions []string, online bool, lastSeen string) map[string]any {
+	makeAgent := func(username, device string, sessions []string, online bool, lastSeen string) map[string]any {
 		return map[string]any{
-			"device":    device,
-			"sessions":  sessions,
-			"online":    online,
-			"last_seen": lastSeen,
+			"username":    username,
+			"device_name": device,
+			"sessions":    sessions,
+			"online":      online,
+			"last_seen":   lastSeen,
 		}
 	}
 
-	t.Run("list current device", func(t *testing.T) {
+	t.Run("list team roster", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/agents/list" {
-				t.Errorf("expected /agents/list, got %s", r.URL.Path)
+			if r.URL.Path != "/api/teams/tm_alpha/agents" {
+				t.Errorf("expected /api/teams/tm_alpha/agents, got %s", r.URL.Path)
 			}
-			if r.URL.Query().Get("all") == "true" {
-				t.Error("expected all=false for list without --all")
-			}
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
-					makeAgent("my-dev", []string{"main", "worker"}, true, "2026-05-03T12:00:00Z"),
+					makeAgent("kirby", "my-dev", []string{"main", "worker"}, true, "2026-05-03T12:00:00Z"),
 				},
 			})
 		}))
@@ -103,17 +100,16 @@ func TestRunList(t *testing.T) {
 		}
 	})
 
-	t.Run("list all devices", func(t *testing.T) {
+	t.Run("list all flag still targets team roster", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Query().Get("all") != "true" {
-				t.Error("expected all=true for list --all")
+			if r.URL.Path != "/api/teams/tm_alpha/agents" {
+				t.Errorf("expected /api/teams/tm_alpha/agents, got %s", r.URL.Path)
 			}
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
-					makeAgent("dev-a", []string{"main"}, true, "2026-05-03T12:00:00Z"),
-					makeAgent("dev-b", []string{"worker"}, false, "2026-05-03T10:00:00Z"),
+					makeAgent("kirby", "dev-a", []string{"main"}, true, "2026-05-03T12:00:00Z"),
+					makeAgent("alice", "dev-b", []string{"worker"}, false, "2026-05-03T10:00:00Z"),
 				},
 			})
 		}))
@@ -174,7 +170,7 @@ func TestRunList(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
 				"agents": []map[string]any{
-					makeAgent("empty-sess", []string{}, false, ""),
+					makeAgent("kirby", "empty-sess", []string{}, false, ""),
 				},
 			})
 		}))
@@ -192,6 +188,16 @@ func TestRunList(t *testing.T) {
 }
 
 func TestRunPingList_errors(t *testing.T) {
+	writeLoggedInConfig := func(t *testing.T, serverURL string) {
+		t.Helper()
+		homeDir := t.TempDir()
+		t.Setenv("HOME", homeDir)
+		os.MkdirAll(homeDir+"/.agentlink", 0755)
+		WriteAccountConfig(homeDir+"/.agentlink/config.toml", AgentConfig{
+			Server: serverURL, UserID: "u_1", Username: "kirby", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
+	}
+
 	t.Run("ping missing config", func(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
@@ -219,12 +225,9 @@ func TestRunPingList_errors(t *testing.T) {
 	})
 
 	t.Run("ping missing credentials", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-		os.MkdirAll(fmt.Sprintf("%s/.agentlink", homeDir), 0755)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		defer srv.Close()
-		WriteConfigTOML(fmt.Sprintf("%s/.agentlink/config.toml", homeDir), srv.URL, "test-dev", homeDir, "claude", false, nil)
+		writeLoggedInConfig(t, srv.URL)
 
 		err := RunPing()
 		if err == nil {
@@ -236,12 +239,9 @@ func TestRunPingList_errors(t *testing.T) {
 	})
 
 	t.Run("list missing credentials", func(t *testing.T) {
-		homeDir := t.TempDir()
-		t.Setenv("HOME", homeDir)
-		os.MkdirAll(fmt.Sprintf("%s/.agentlink", homeDir), 0755)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		defer srv.Close()
-		WriteConfigTOML(fmt.Sprintf("%s/.agentlink/config.toml", homeDir), srv.URL, "test-dev", homeDir, "claude", false, nil)
+		writeLoggedInConfig(t, srv.URL)
 
 		err := RunList(false)
 		if err == nil {

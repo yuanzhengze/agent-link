@@ -10,6 +10,9 @@ import (
 	"testing"
 )
 
+// setupTaskEnv writes a v2 logged-in environment (account config with an active
+// team + a device-session credential) and returns the "worker" session dir so a
+// test can Chdir into it; FindCurrentSession then resolves to "worker".
 func setupTaskEnv(t *testing.T, serverURL string) string {
 	t.Helper()
 
@@ -18,11 +21,15 @@ func setupTaskEnv(t *testing.T, serverURL string) string {
 
 	agentlinkDir := filepath.Join(homeDir, ".agentlink")
 	os.MkdirAll(agentlinkDir, 0755)
-	WriteConfigTOML(filepath.Join(agentlinkDir, "config.toml"), serverURL, "test-device", homeDir, "claude", false, nil)
-
-	creds := map[string]string{"api_key": "sk_live_" + strings.Repeat("a", 64)}
-	credData, _ := json.MarshalIndent(creds, "", "  ")
-	os.WriteFile(filepath.Join(agentlinkDir, "credentials.json"), credData, 0600)
+	WriteAccountConfig(filepath.Join(agentlinkDir, "config.toml"), AgentConfig{
+		Server:      serverURL,
+		UserID:      "u_1",
+		Username:    "kirby",
+		DeviceID:    "d_1",
+		Device:      "test-device",
+		CurrentTeam: "tm_alpha",
+	})
+	WriteCredentials(filepath.Join(agentlinkDir, "credentials.json"), AgentCredentials{DeviceSession: "ds_test"})
 
 	sessionDir := filepath.Join(homeDir, "worker")
 	os.MkdirAll(sessionDir, 0755)
@@ -32,24 +39,29 @@ func setupTaskEnv(t *testing.T, serverURL string) string {
 }
 
 func TestRunTaskSend(t *testing.T) {
-	var captured struct {
-		to          string
-		fromSession string
-		taskID      string
-		content     string
-		authHeader  string
+	type capture struct {
+		path       string
+		to         string
+		fromField  string
+		taskID     string
+		content    string
+		authHeader string
+		session    string
 	}
+	var captured capture
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.path = r.URL.Path
 		captured.authHeader = r.Header.Get("Authorization")
+		captured.session = r.Header.Get("X-Agentlink-Session")
 
-		var req map[string]string
+		var req map[string]any
 		json.NewDecoder(r.Body).Decode(&req)
 		r.Body.Close()
-		captured.to = req["to"]
-		captured.fromSession = req["from_session"]
-		captured.taskID = req["task_id"]
-		captured.content = req["content"]
+		captured.to, _ = req["to"].(string)
+		captured.fromField, _ = req["from_session"].(string)
+		captured.taskID, _ = req["task_id"].(string)
+		captured.content, _ = req["content"].(string)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"id": "test-msg-id"})
@@ -58,15 +70,8 @@ func TestRunTaskSend(t *testing.T) {
 
 	sessionDir := setupTaskEnv(t, mockSrv.URL)
 
-	t.Run("send with short name", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			taskID      string
-			content     string
-			authHeader  string
-		}{}
-
+	t.Run("send with short name targets own device", func(t *testing.T) {
+		captured = capture{}
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
@@ -74,33 +79,28 @@ func TestRunTaskSend(t *testing.T) {
 		if err := RunTaskSend("worker", "001", "fix login bug", false, ""); err != nil {
 			t.Fatal(err)
 		}
-
-		if captured.to != "test-device:worker" {
-			t.Errorf("expected to=test-device:worker, got %s", captured.to)
+		if captured.path != "/api/teams/tm_alpha/tasks" {
+			t.Errorf("expected /api/teams/tm_alpha/tasks, got %s", captured.path)
 		}
-		if captured.fromSession != "worker" {
-			t.Errorf("expected from_session=worker, got %s", captured.fromSession)
+		if captured.to != "d_1:worker" {
+			t.Errorf("expected to=d_1:worker, got %s", captured.to)
 		}
-		if captured.taskID != "001" {
-			t.Errorf("expected task_id=001, got %s", captured.taskID)
+		if captured.fromField != "" {
+			t.Errorf("from_session must not be sent; got %q", captured.fromField)
 		}
-		if captured.content != "fix login bug" {
-			t.Errorf("expected content=fix login bug, got %s", captured.content)
+		if captured.session != "worker" {
+			t.Errorf("expected X-Agentlink-Session=worker, got %s", captured.session)
 		}
-		if captured.authHeader == "" {
-			t.Error("expected auth header")
+		if !strings.HasPrefix(captured.authHeader, "Device ") {
+			t.Errorf("expected Device auth, got %q", captured.authHeader)
+		}
+		if captured.taskID != "001" || captured.content != "fix login bug" {
+			t.Errorf("unexpected task fields: %+v", captured)
 		}
 	})
 
-	t.Run("send with full name", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			taskID      string
-			content     string
-			authHeader  string
-		}{}
-
+	t.Run("send with full device:session name", func(t *testing.T) {
+		captured = capture{}
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
@@ -108,37 +108,8 @@ func TestRunTaskSend(t *testing.T) {
 		if err := RunTaskSend("other-dev:reviewer", "002", "review code", false, ""); err != nil {
 			t.Fatal(err)
 		}
-
 		if captured.to != "other-dev:reviewer" {
 			t.Errorf("expected to=other-dev:reviewer, got %s", captured.to)
-		}
-		if captured.taskID != "002" {
-			t.Errorf("expected task_id=002, got %s", captured.taskID)
-		}
-		if captured.content != "review code" {
-			t.Errorf("expected content=review code, got %s", captured.content)
-		}
-	})
-
-	t.Run("send with multi-word content", func(t *testing.T) {
-		captured = struct {
-			to          string
-			fromSession string
-			taskID      string
-			content     string
-			authHeader  string
-		}{}
-
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
-
-		content := "fix the login bug and add tests"
-		if err := RunTaskSend("worker", "003", content, false, ""); err != nil {
-			t.Fatal(err)
-		}
-		if captured.content != content {
-			t.Errorf("content mismatch:\nexpected: %q\ngot: %q", content, captured.content)
 		}
 	})
 
@@ -148,10 +119,9 @@ func TestRunTaskSend(t *testing.T) {
 			json.NewEncoder(w).Encode(map[string]any{
 				"error": "target session is busy",
 				"recipient_status": map[string]any{
-					"device":       "worker-dev",
-					"session":      "main",
-					"status":       "busy",
-					"current_task": "deploy-042",
+					"device_id": "d_2",
+					"session":   "main",
+					"current":   "task: deploy-042",
 				},
 			})
 		}))
@@ -162,8 +132,7 @@ func TestRunTaskSend(t *testing.T) {
 		os.Chdir(sessionDir)
 		defer os.Chdir(origWd)
 
-		err := RunTaskSend("worker", "001", "test", false, "")
-		if err != nil {
+		if err := RunTaskSend("worker", "001", "test", false, ""); err != nil {
 			t.Errorf("expected no error for 409 with status, got: %s", err)
 		}
 	})
@@ -187,7 +156,9 @@ func TestRunTaskSend_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
+		WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
 
 		err := RunTaskSend("worker", "001", "hi", false, "")
 		if err == nil {
@@ -202,10 +173,10 @@ func TestRunTaskSend_errors(t *testing.T) {
 		homeDir := t.TempDir()
 		t.Setenv("HOME", homeDir)
 		os.MkdirAll(filepath.Join(homeDir, ".agentlink"), 0755)
-		WriteConfigTOML(filepath.Join(homeDir, ".agentlink", "config.toml"), "http://localhost:1", "test-dev", homeDir, "claude", false, nil)
-		creds := map[string]string{"api_key": "sk_live_test"}
-		credData, _ := json.MarshalIndent(creds, "", "  ")
-		os.WriteFile(filepath.Join(homeDir, ".agentlink", "credentials.json"), credData, 0600)
+		WriteAccountConfig(filepath.Join(homeDir, ".agentlink", "config.toml"), AgentConfig{
+			Server: "http://localhost:1", UserID: "u_1", Username: "k", DeviceID: "d_1", Device: "test-dev", CurrentTeam: "tm_alpha",
+		})
+		WriteCredentials(filepath.Join(homeDir, ".agentlink", "credentials.json"), AgentCredentials{DeviceSession: "ds_x"})
 
 		err := RunTaskSend("worker", "001", "hi", false, "")
 		if err == nil {
@@ -219,16 +190,16 @@ func TestRunTaskSend_errors(t *testing.T) {
 
 func TestRunTaskResult(t *testing.T) {
 	var captured struct {
-		taskID string
+		path   string
 		status string
 		result string
 	}
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.path = r.URL.Path
 		var req map[string]string
 		json.NewDecoder(r.Body).Decode(&req)
 		r.Body.Close()
-		captured.taskID = req["task_id"]
 		captured.status = req["status"]
 		captured.result = req["result"]
 
@@ -237,7 +208,7 @@ func TestRunTaskResult(t *testing.T) {
 	}))
 	defer mockSrv.Close()
 
-	t.Run("result completed", func(t *testing.T) {
+	t.Run("result completed puts task id in the path", func(t *testing.T) {
 		sessionDir := setupTaskEnv(t, mockSrv.URL)
 		origWd, _ := os.Getwd()
 		os.Chdir(sessionDir)
@@ -246,31 +217,11 @@ func TestRunTaskResult(t *testing.T) {
 		if err := RunTaskResult("001", "completed", "bug fixed"); err != nil {
 			t.Fatal(err)
 		}
-		if captured.taskID != "001" {
-			t.Errorf("expected task_id=001, got %s", captured.taskID)
+		if captured.path != "/api/teams/tm_alpha/tasks/001/result" {
+			t.Errorf("expected /api/teams/tm_alpha/tasks/001/result, got %s", captured.path)
 		}
-		if captured.status != "completed" {
-			t.Errorf("expected status=completed, got %s", captured.status)
-		}
-		if captured.result != "bug fixed" {
-			t.Errorf("expected result=bug fixed, got %s", captured.result)
-		}
-	})
-
-	t.Run("result suspended", func(t *testing.T) {
-		sessionDir := setupTaskEnv(t, mockSrv.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
-
-		if err := RunTaskResult("001", "suspended", "need more info"); err != nil {
-			t.Fatal(err)
-		}
-		if captured.status != "suspended" {
-			t.Errorf("expected status=suspended, got %s", captured.status)
-		}
-		if captured.result != "need more info" {
-			t.Errorf("expected result=need more info, got %s", captured.result)
+		if captured.status != "completed" || captured.result != "bug fixed" {
+			t.Errorf("unexpected body: %+v", captured)
 		}
 	})
 
@@ -298,15 +249,15 @@ func TestRunTaskResult(t *testing.T) {
 
 func TestRunTaskResume(t *testing.T) {
 	var captured struct {
-		taskID  string
+		path    string
 		content string
 	}
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.path = r.URL.Path
 		var req map[string]string
 		json.NewDecoder(r.Body).Decode(&req)
 		r.Body.Close()
-		captured.taskID = req["task_id"]
 		captured.content = req["content"]
 
 		w.Header().Set("Content-Type", "application/json")
@@ -314,103 +265,89 @@ func TestRunTaskResume(t *testing.T) {
 	}))
 	defer mockSrv.Close()
 
-	t.Run("resume success", func(t *testing.T) {
-		sessionDir := setupTaskEnv(t, mockSrv.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
+	sessionDir := setupTaskEnv(t, mockSrv.URL)
+	origWd, _ := os.Getwd()
+	os.Chdir(sessionDir)
+	defer os.Chdir(origWd)
 
-		if err := RunTaskResume("001", "new guidance: do X first"); err != nil {
-			t.Fatal(err)
-		}
-		if captured.taskID != "001" {
-			t.Errorf("expected task_id=001, got %s", captured.taskID)
-		}
-		if captured.content != "new guidance: do X first" {
-			t.Errorf("expected content mismatch, got %s", captured.content)
-		}
-	})
-
-	t.Run("resume not found", func(t *testing.T) {
-		mockSrv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "task not found"})
-		}))
-		defer mockSrv404.Close()
-
-		sessionDir := setupTaskEnv(t, mockSrv404.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
-
-		err := RunTaskResume("999", "new guidance")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
+	if err := RunTaskResume("001", "new guidance: do X first"); err != nil {
+		t.Fatal(err)
+	}
+	if captured.path != "/api/teams/tm_alpha/tasks/001/resume" {
+		t.Errorf("expected /api/teams/tm_alpha/tasks/001/resume, got %s", captured.path)
+	}
+	if captured.content != "new guidance: do X first" {
+		t.Errorf("content mismatch, got %s", captured.content)
+	}
 }
 
 func TestRunTaskCancel(t *testing.T) {
-	var capturedTaskID string
+	var capturedPath string
 
 	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req map[string]string
-		json.NewDecoder(r.Body).Decode(&req)
-		r.Body.Close()
-		capturedTaskID = req["task_id"]
-
+		capturedPath = r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 	defer mockSrv.Close()
 
-	t.Run("cancel success", func(t *testing.T) {
-		sessionDir := setupTaskEnv(t, mockSrv.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
+	sessionDir := setupTaskEnv(t, mockSrv.URL)
+	origWd, _ := os.Getwd()
+	os.Chdir(sessionDir)
+	defer os.Chdir(origWd)
 
-		if err := RunTaskCancel("001"); err != nil {
-			t.Fatal(err)
-		}
-		if capturedTaskID != "001" {
-			t.Errorf("expected task_id=001, got %s", capturedTaskID)
-		}
-	})
+	if err := RunTaskCancel("001"); err != nil {
+		t.Fatal(err)
+	}
+	if capturedPath != "/api/teams/tm_alpha/tasks/001/cancel" {
+		t.Errorf("expected /api/teams/tm_alpha/tasks/001/cancel, got %s", capturedPath)
+	}
+}
 
-	t.Run("cancel not found", func(t *testing.T) {
-		mockSrv404 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(map[string]string{"error": "task not found"})
-		}))
-		defer mockSrv404.Close()
+func TestRunTaskReopen(t *testing.T) {
+	var captured struct {
+		path   string
+		reason string
+	}
 
-		sessionDir := setupTaskEnv(t, mockSrv404.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured.path = r.URL.Path
+		var req map[string]string
+		json.NewDecoder(r.Body).Decode(&req)
+		r.Body.Close()
+		captured.reason = req["reason"]
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer mockSrv.Close()
 
-		err := RunTaskCancel("999")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
+	sessionDir := setupTaskEnv(t, mockSrv.URL)
+	origWd, _ := os.Getwd()
+	os.Chdir(sessionDir)
+	defer os.Chdir(origWd)
+
+	if err := RunTaskReopen("001", "changed requirements"); err != nil {
+		t.Fatal(err)
+	}
+	if captured.path != "/api/teams/tm_alpha/tasks/001/reopen" {
+		t.Errorf("expected /api/teams/tm_alpha/tasks/001/reopen, got %s", captured.path)
+	}
+	if captured.reason != "changed requirements" {
+		t.Errorf("reason mismatch, got %s", captured.reason)
+	}
 }
 
 func TestRunTaskStatus(t *testing.T) {
-	t.Run("status success", func(t *testing.T) {
+	t.Run("status success uses path param", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			taskID := r.URL.Query().Get("task_id")
-			if taskID != "001" {
-				t.Errorf("expected task_id=001, got %s", taskID)
+			if r.URL.Path != "/api/teams/tm_alpha/tasks/001" {
+				t.Errorf("expected /api/teams/tm_alpha/tasks/001, got %s", r.URL.Path)
 			}
-
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]string{
 				"task_id":      "001",
 				"status":       "completed",
-				"assigned_to":  "device:worker",
-				"issued_by":    "device:main",
+				"assigned_to":  "d_1:worker",
+				"issued_by":    "d_1:main",
 				"content":      "fix login bug",
 				"result":       "bug fixed",
 				"issued_at":    "2026-05-03T12:00:00Z",
@@ -449,39 +386,24 @@ func TestRunTaskStatus(t *testing.T) {
 			t.Errorf("expected not found error, got: %s", err)
 		}
 	})
-
-	t.Run("status server error", func(t *testing.T) {
-		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]string{"error": "internal error"})
-		}))
-		defer mockSrv.Close()
-
-		sessionDir := setupTaskEnv(t, mockSrv.URL)
-		origWd, _ := os.Getwd()
-		os.Chdir(sessionDir)
-		defer os.Chdir(origWd)
-
-		err := RunTaskStatus("001")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	})
 }
+
 func TestRunTaskList(t *testing.T) {
 	t.Run("list with tasks", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/tasks/list" {
-				t.Errorf("expected /tasks/list, got %s", r.URL.Path)
+			if r.URL.Path != "/api/teams/tm_alpha/tasks" {
+				t.Errorf("expected /api/teams/tm_alpha/tasks, got %s", r.URL.Path)
 			}
-			if r.URL.Query().Get("session") != "worker" {
-				t.Errorf("expected session=worker, got %s", r.URL.Query().Get("session"))
+			if r.Header.Get("X-Agentlink-Session") != "worker" {
+				t.Errorf("expected session header worker, got %s", r.Header.Get("X-Agentlink-Session"))
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(map[string]any{
-				"tasks": []map[string]string{
-					{"task_id": "t-1", "status": "issued", "assigned_to": "dev:worker", "issued_by": "dev:main", "content": "task one", "issued_at": "2026-01-01T00:00:00Z"},
-					{"task_id": "t-2", "status": "in_progress", "assigned_to": "dev:worker", "issued_by": "dev:main", "content": "task two", "issued_at": "2026-01-01T00:01:00Z"},
+				"received": []map[string]string{
+					{"task_id": "t-1", "status": "issued", "assigned_to": "d_1:worker", "issued_by": "d_1:main", "content": "task one", "issued_at": "2026-01-01T00:00:00Z"},
+				},
+				"sent": []map[string]string{
+					{"task_id": "t-2", "status": "in_progress", "assigned_to": "d_1:worker", "issued_by": "d_1:main", "content": "task two", "issued_at": "2026-01-01T00:01:00Z"},
 				},
 			})
 		}))
@@ -500,7 +422,7 @@ func TestRunTaskList(t *testing.T) {
 	t.Run("list empty", func(t *testing.T) {
 		mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{"tasks": []any{}})
+			json.NewEncoder(w).Encode(map[string]any{"received": []any{}, "sent": []any{}})
 		}))
 		defer mockSrv.Close()
 

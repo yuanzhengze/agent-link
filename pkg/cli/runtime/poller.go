@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -18,9 +19,10 @@ import (
 
 // Poller polls the inbox and injects messages into the agent via tmux.
 type Poller struct {
-	Session string
-	Server  string
-	APIKey  string
+	Session       string
+	Server        string
+	TeamID        string
+	DeviceSession string
 
 	// IdleDetector checks whether the agent pane is ready for input.
 	IdleDetector adapter.IdleDetector
@@ -102,12 +104,24 @@ func (p *Poller) Run() error {
 	}
 }
 
+// teamURL builds a full team-scoped URL for the poller's active team.
+func (p *Poller) teamURL(suffix string) string {
+	return p.Server + "/api/teams/" + url.PathEscape(p.TeamID) + suffix
+}
+
+// authHeaders stamps a request with the Device credential and the poller's
+// local session, so the server attributes presence/inbox to the right actor.
+func (p *Poller) authHeaders(req *http.Request) {
+	req.Header.Set("Authorization", "Device "+p.DeviceSession)
+	req.Header.Set("X-Agentlink-Session", p.Session)
+}
+
 func (p *Poller) heartbeat() {
-	req, err := http.NewRequestWithContext(p.ctx(), "POST", p.Server+"/agents/heartbeat", nil)
+	req, err := http.NewRequestWithContext(p.ctx(), "POST", p.teamURL("/agents/heartbeat"), nil)
 	if err != nil {
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	p.authHeaders(req)
 	resp, err := p.httpDo(req)
 	if err != nil {
 		return
@@ -133,12 +147,11 @@ type pollerPullResponse struct {
 }
 
 func (p *Poller) pullOne() (*pollerInboxItem, error) {
-	url := fmt.Sprintf("%s/inbox/pull?session=%s&limit=1", p.Server, p.Session)
-	req, err := http.NewRequestWithContext(p.ctx(), "GET", url, nil)
+	req, err := http.NewRequestWithContext(p.ctx(), "GET", p.teamURL("/inbox?limit=1"), nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	p.authHeaders(req)
 
 	resp, err := p.httpDo(req)
 	if err != nil {
@@ -260,6 +273,10 @@ func RunPoll() error {
 		return nil
 	}
 
+	if cfg.CurrentTeam == "" {
+		return fmt.Errorf("no active team; run agentlink team use <team_id>")
+	}
+
 	session, err := api.FindCurrentSession()
 	if err != nil {
 		return err
@@ -271,12 +288,13 @@ func RunPoll() error {
 	}
 
 	p := &Poller{
-		Session:      session,
-		Server:       cfg.Server,
-		APIKey:       creds.APIKey,
-		Interval:     time.Duration(interval) * time.Second,
-		Stdout:       os.Stdout,
-		IdleDetector: adapter.NewDetector(cfg.Agent),
+		Session:       session,
+		Server:        cfg.Server,
+		TeamID:        cfg.CurrentTeam,
+		DeviceSession: creds.DeviceSession,
+		Interval:      time.Duration(interval) * time.Second,
+		Stdout:        os.Stdout,
+		IdleDetector:  adapter.NewDetector(cfg.Agent),
 	}
 	return p.Run()
 }

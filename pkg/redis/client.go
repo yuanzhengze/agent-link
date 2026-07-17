@@ -12,8 +12,13 @@ type Client struct {
 }
 
 func NewClient(addr string) (*Client, error) {
+	return NewClientDB(addr, 0)
+}
+
+func NewClientDB(addr string, db int) (*Client, error) {
 	c := redis.NewClient(&redis.Options{
 		Addr: addr,
+		DB:   db,
 	})
 
 	if err := c.Ping(context.Background()).Err(); err != nil {

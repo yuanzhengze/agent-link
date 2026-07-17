@@ -37,11 +37,22 @@ func (l *ClaudeCodeLauncher) CheckPrereqs() error {
 	return nil
 }
 
+// coworkLockRules documents the cowork file-lock protocol that agents must
+// follow before editing files in a shared project: acquire a lock, handle
+// 409 (already held) by backing off, then release when done.
+const coworkLockRules = `## 协同写锁规则（cowork）
+- 修改任何文件前，先执行：agentlink lock acquire <project> <相对路径>
+- 若返回 409（被占用），改去做别的文件，或稍后重试；不要强行修改。
+- 改完后执行：agentlink lock release <project> <相对路径>
+- 不要绕过锁直接改文件——服务器会拒绝未持锁的写入（apply 409）。
+`
+
 func (l *ClaudeCodeLauncher) InitTemplate(session string, device string) string {
 	return fmt.Sprintf(
 		"You are agentlink device **%s**, session **%s** on the team network.\n"+
-			"When involving agent collaboration network, run `agentlink whoami` first.\n",
-		device, session,
+			"When involving agent collaboration network, run `agentlink whoami` first.\n"+
+			"\n%s",
+		device, session, coworkLockRules,
 	)
 }
 

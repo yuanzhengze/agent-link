@@ -1,12 +1,54 @@
 package rt
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
 	api "github.com/team/agentlink/pkg/cli/net"
 )
+
+// TestResumeRejectsRemovedCurrentTeam proves the pre-launch team/device check
+// fails when the current team is no longer accessible (e.g. the member was
+// removed): the team heartbeat returns 404 and pingServer surfaces an error, so
+// resume aborts before touching tmux.
+func TestResumeRejectsRemovedCurrentTeam(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/teams/tm_gone/agents/heartbeat" {
+			t.Errorf("expected team heartbeat path, got %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"team not found"}`))
+	}))
+	defer srv.Close()
+
+	cfg := &api.AgentConfig{Server: srv.URL, DeviceID: "d_1", Device: "dev", CurrentTeam: "tm_gone"}
+	creds := &api.AgentCredentials{DeviceSession: "ds_test"}
+
+	if err := pingServer(cfg, creds); err == nil {
+		t.Fatal("expected pingServer to fail for a removed team membership")
+	}
+}
+
+func TestPingServerSucceedsForCurrentTeam(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Device ds_test" {
+			t.Errorf("expected Device auth, got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	cfg := &api.AgentConfig{Server: srv.URL, DeviceID: "d_1", Device: "dev", CurrentTeam: "tm_alpha"}
+	creds := &api.AgentCredentials{DeviceSession: "ds_test"}
+
+	if err := pingServer(cfg, creds); err != nil {
+		t.Fatalf("expected pingServer to succeed, got %v", err)
+	}
+}
 
 func TestReadTOMLSection(t *testing.T) {
 	content := `server = "http://example.com"

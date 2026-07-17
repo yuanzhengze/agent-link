@@ -1,10 +1,13 @@
 GO      ?= go
 BINDIR  ?= /usr/local/bin
 
-.PHONY: build build-all build-server install uninstall reinstall clean test lint
+.PHONY: build build-all build-server build-admin install uninstall reinstall clean test lint
 
 build:
 	$(GO) build -o agentlink ./cmd/agentlink/
+
+build-admin:
+	$(GO) build -o agentlink-admin ./cmd/agentlink-admin/
 
 # CGO_ENABLED=0 produces static binaries with no glibc dependency, so the
 # release artifacts run on any Linux regardless of the build machine's glibc
@@ -28,7 +31,7 @@ uninstall:
 reinstall: uninstall install
 
 clean:
-	rm -f agentlink server
+	rm -f agentlink server agentlink-admin
 	rm -rf bin
 
 test:

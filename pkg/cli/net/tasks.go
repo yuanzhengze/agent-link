@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"net/url"
 )
 
 func RunTaskSend(target, taskID, content string, interrupt bool, title string) error {
@@ -20,25 +20,26 @@ func RunTaskSend(target, taskID, content string, interrupt bool, title string) e
 		return err
 	}
 
-	if !strings.Contains(target, ":") {
-		target = cfg.Device + ":" + target
+	path, err := TeamPath(cfg, "/tasks")
+	if err != nil {
+		return err
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"to":           target,
-		"from_session": session,
-		"task_id":      taskID,
-		"title":        title,
-		"content":      content,
-		"interrupt":    interrupt,
+		"to":        resolveTarget(cfg, target),
+		"task_id":   taskID,
+		"title":     title,
+		"content":   content,
+		"interrupt": interrupt,
 	})
 
-	req, err := http.NewRequest("POST", cfg.Server+"/tasks/send", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", cfg.Server+path, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("cannot create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+creds.APIKey)
+	req.Header.Set("Authorization", "Device "+creds.DeviceSession)
+	req.Header.Set("X-Agentlink-Session", session)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -60,7 +61,7 @@ func RunTaskSend(target, taskID, content string, interrupt bool, title string) e
 		return nil
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e struct {
 			Error string `json:"error"`
 		}
@@ -80,7 +81,7 @@ func RunTaskSend(target, taskID, content string, interrupt bool, title string) e
 		taskID = sendResp.TaskID
 	}
 
-	fmt.Printf("✓ Task %s sent to %s\n", taskID, target)
+	fmt.Printf("✓ Task %s sent to %s\n", taskID, resolveTarget(cfg, target))
 	displayRecipientStatus(sendResp.RecipientStatus)
 	fmt.Print("  Result will be delivered via notification when done — no need to poll.\n")
 	return nil
@@ -92,10 +93,13 @@ func RunTaskResult(taskID, status, result string) error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/tasks/result", map[string]string{
-		"task_id": taskID,
-		"status":  status,
-		"result":  result,
+	path, err := taskActionPath(cfg, taskID, "/result")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, map[string]string{
+		"status": status,
+		"result": result,
 	})
 	if err != nil {
 		return err
@@ -116,8 +120,11 @@ func RunTaskResume(taskID, content string) error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/tasks/resume", map[string]string{
-		"task_id": taskID,
+	path, err := taskActionPath(cfg, taskID, "/resume")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, map[string]string{
 		"content": content,
 	})
 	if err != nil {
@@ -135,9 +142,11 @@ func RunTaskCancel(taskID string) error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/tasks/cancel", map[string]string{
-		"task_id": taskID,
-	})
+	path, err := taskActionPath(cfg, taskID, "/cancel")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, nil)
 	if err != nil {
 		return err
 	}
@@ -153,9 +162,12 @@ func RunTaskReopen(taskID, reason string) error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "POST", "/tasks/reopen", map[string]string{
-		"task_id": taskID,
-		"reason":  reason,
+	path, err := taskActionPath(cfg, taskID, "/reopen")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDo(cfg, creds, "POST", path, map[string]string{
+		"reason": reason,
 	})
 	if err != nil {
 		return err
@@ -164,6 +176,17 @@ func RunTaskReopen(taskID, reason string) error {
 
 	fmt.Printf("✓ Task %s reopened\n", taskID)
 	return nil
+}
+
+type taskItem struct {
+	TaskID      string `json:"task_id"`
+	Status      string `json:"status"`
+	AssignedTo  string `json:"assigned_to"`
+	IssuedBy    string `json:"issued_by"`
+	Content     string `json:"content"`
+	Result      string `json:"result"`
+	IssuedAt    string `json:"issued_at"`
+	CompletedAt string `json:"completed_at"`
 }
 
 func RunTaskList() error {
@@ -177,23 +200,16 @@ func RunTaskList() error {
 		return err
 	}
 
-	path := fmt.Sprintf("/tasks/list?session=%s", session)
-	resp, err := APIDo(cfg, creds, "GET", path, nil)
+	path, err := TeamPath(cfg, "/tasks")
+	if err != nil {
+		return err
+	}
+	resp, err := APIDoWithSession(cfg, creds, session, "GET", path, nil)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	type taskItem struct {
-		TaskID      string `json:"task_id"`
-		Status      string `json:"status"`
-		AssignedTo  string `json:"assigned_to"`
-		IssuedBy    string `json:"issued_by"`
-		Content     string `json:"content"`
-		Result      string `json:"result"`
-		IssuedAt    string `json:"issued_at"`
-		CompletedAt string `json:"completed_at"`
-	}
 	var result struct {
 		Received []taskItem `json:"received"`
 		Sent     []taskItem `json:"sent"`
@@ -234,23 +250,17 @@ func RunTaskStatus(taskID string) error {
 		return err
 	}
 
-	path := fmt.Sprintf("/tasks/status?task_id=%s", taskID)
+	path, err := taskActionPath(cfg, taskID, "")
+	if err != nil {
+		return err
+	}
 	resp, err := APIDo(cfg, creds, "GET", path, nil)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		TaskID      string `json:"task_id"`
-		Status      string `json:"status"`
-		AssignedTo  string `json:"assigned_to"`
-		IssuedBy    string `json:"issued_by"`
-		Content     string `json:"content"`
-		Result      string `json:"result"`
-		IssuedAt    string `json:"issued_at"`
-		CompletedAt string `json:"completed_at"`
-	}
+	var result taskItem
 	json.NewDecoder(resp.Body).Decode(&result)
 
 	fmt.Printf("Task:      %s\n", result.TaskID)
@@ -267,4 +277,10 @@ func RunTaskStatus(taskID string) error {
 	}
 
 	return nil
+}
+
+// taskActionPath builds a team-scoped task path for the given task id and action
+// suffix (e.g. "/result", "/resume", or "" for status).
+func taskActionPath(cfg *AgentConfig, taskID, action string) (string, error) {
+	return TeamPath(cfg, "/tasks/"+url.PathEscape(taskID)+action)
 }
