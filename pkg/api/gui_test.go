@@ -58,9 +58,42 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`会创建一个空项目，用 CLI 同步静态原型后才能预览`,
 		`只显示一次，加入需要这两行`,
 		`复制团队 ID 和邀请码`,
+		`lang="zh-CN"`,
+		`&larr; 项目`,
+		`+ 团队`,
+		`id="btn-join-team-top" class="btn-secondary btn-small" type="button">加入</button>`,
+		`id="btn-members" class="btn-secondary btn-small" type="button">成员</button>`,
+		`id="btn-logout" class="btn-secondary btn-small" type="button">退出登录</button>`,
+		`<h1>项目</h1>`,
+		`id="btn-refresh-projects" class="btn-secondary" type="button">刷新</button>`,
+		`<h2>文件</h2>`,
+		`id="btn-refresh-tree" class="btn-secondary btn-small" type="button">刷新</button>`,
+		`<h2>预览</h2>`,
+		`<h2>在线</h2>`,
+		`<h2>告警</h2>`,
+		`id="btn-clear-alerts" class="btn-secondary btn-small" type="button">清除</button>`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
+		}
+	}
+	for _, gone := range []string{
+		`lang="en"`,
+		`&larr; Projects`,
+		`>+ Team<`,
+		`>Join</button>`,
+		`>Members</button>`,
+		`>Sign out</button>`,
+		`<h1>Projects</h1>`,
+		`>Refresh</button>`,
+		`<h2>Files</h2>`,
+		`<h2>Preview</h2>`,
+		`<h2>Online</h2>`,
+		`<h2>Alerts</h2>`,
+		`>Clear</button>`,
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("GUI still has English chrome %s", gone)
 		}
 	}
 }

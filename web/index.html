@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -86,16 +86,16 @@
       <div class="brand">
         <span class="brand-mark">◆</span>
         <span class="brand-name">cowork</span>
-        <button id="btn-back" class="btn-back hidden" type="button">&larr; Projects</button>
+        <button id="btn-back" class="btn-back hidden" type="button">&larr; 项目</button>
         <span id="current-project-name" class="current-project-name"></span>
       </div>
       <div class="topbar-right">
         <select id="team-switcher" class="team-switcher" aria-label="Active team"></select>
-        <button id="btn-create-team" class="btn-secondary btn-small" type="button">+ Team</button>
-        <button id="btn-join-team-top" class="btn-secondary btn-small" type="button">Join</button>
-        <button id="btn-members" class="btn-secondary btn-small" type="button">Members</button>
+        <button id="btn-create-team" class="btn-secondary btn-small" type="button">+ 团队</button>
+        <button id="btn-join-team-top" class="btn-secondary btn-small" type="button">加入</button>
+        <button id="btn-members" class="btn-secondary btn-small" type="button">成员</button>
         <span id="current-username" class="current-username"></span>
-        <button id="btn-logout" class="btn-secondary btn-small" type="button">Sign out</button>
+        <button id="btn-logout" class="btn-secondary btn-small" type="button">退出登录</button>
       </div>
     </header>
 
@@ -103,10 +103,10 @@
 
     <main id="view-projects" class="view">
       <div class="view-header">
-        <h1>Projects</h1>
+        <h1>项目</h1>
         <div>
           <button id="btn-new-project" class="btn-secondary" type="button">新建项目</button>
-          <button id="btn-refresh-projects" class="btn-secondary" type="button">Refresh</button>
+          <button id="btn-refresh-projects" class="btn-secondary" type="button">刷新</button>
         </div>
       </div>
       <ul id="project-list" class="project-list"></ul>
@@ -117,8 +117,8 @@
       <div class="panes">
         <section class="pane pane-tree">
           <div class="pane-header">
-            <h2>Files</h2>
-            <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">Refresh</button>
+            <h2>文件</h2>
+            <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">刷新</button>
           </div>
           <ul id="file-tree" class="file-tree"></ul>
           <div id="file-tree-empty" class="empty-hint hidden">
@@ -130,7 +130,7 @@
 
         <section class="pane pane-preview">
           <div class="pane-header">
-            <h2>Preview</h2>
+            <h2>预览</h2>
           </div>
           <p id="preview-error" class="preview-error hidden"></p>
           <div id="preview-empty" class="preview-empty">
@@ -147,14 +147,14 @@
 
         <section class="pane pane-side">
           <div class="pane-header">
-            <h2>Online</h2>
+            <h2>在线</h2>
           </div>
           <ul id="online-panel" class="online-panel"></ul>
           <p id="online-panel-empty" class="empty-hint hidden">No agents seen yet.</p>
 
           <div class="pane-header pane-header-alerts">
-            <h2>Alerts</h2>
-            <button id="btn-clear-alerts" class="btn-secondary btn-small" type="button">Clear</button>
+            <h2>告警</h2>
+            <button id="btn-clear-alerts" class="btn-secondary btn-small" type="button">清除</button>
           </div>
           <ul id="alert-stream" class="alert-stream"></ul>
         </section>
