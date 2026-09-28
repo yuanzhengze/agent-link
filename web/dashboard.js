@@ -169,7 +169,7 @@
     if (!state.team) return;
     var name = (el.inputProjectName && el.inputProjectName.value || "").trim();
     if (!name) {
-      showProjectModalError("Enter a project name.");
+      showProjectModalError("请输入项目名称。");
       return;
     }
     clearProjectModalError();
@@ -178,7 +178,7 @@
       body: JSON.stringify({ name: name })
     }).then(function (res) {
       if (!res.ok) {
-        showProjectModalError((res.body && res.body.error) || ("Create failed (" + res.status + ")"));
+        showProjectModalError((res.body && res.body.error) || ("创建失败（" + res.status + "）"));
         return;
       }
       closeProjectModal();
@@ -229,7 +229,7 @@
 
   function showPreviewWaiting(lead) {
     if (el.previewEmptyLead) {
-      el.previewEmptyLead.textContent = lead || "Nothing to preview yet.";
+      el.previewEmptyLead.textContent = lead || "还没有可预览的内容";
     }
     if (el.fileSyncCommand) el.fileSyncCommand.textContent = syncCommands();
     if (el.previewSyncCommand) el.previewSyncCommand.textContent = syncCommands();
@@ -260,7 +260,7 @@
       });
       if (res.ok && files.length === 1 && index && isSeedIndex(index.content)) {
         state.hasIndex = false;
-        showPreviewWaiting("Starter page only.");
+        showPreviewWaiting("目前只有起始页");
         return;
       }
       state.hasIndex = true;
@@ -279,12 +279,12 @@
     if (el.previewSyncCommand) el.previewSyncCommand.textContent = commands;
     if (el.fileTreeEmpty) el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
     if (!hasIndex) {
-      showPreviewWaiting(files.length ? "No index.html yet." : "Nothing to preview yet.");
+      showPreviewWaiting("还没有可预览的内容");
       return;
     }
     if (files.length === 1 && files[0].path === "index.html") {
       state.hasIndex = false;
-      showPreviewWaiting("Starter page only.");
+      showPreviewWaiting("目前只有起始页");
       confirmNotSeed(epoch, state.currentProjectId);
       return;
     }
@@ -295,8 +295,8 @@
     var text = syncCommands();
     var done = function () {
       if (!el.btnCopySync) return;
-      el.btnCopySync.textContent = "Copied";
-      setTimeout(function () { el.btnCopySync.textContent = "Copy commands"; }, 1500);
+      el.btnCopySync.textContent = "已复制";
+      setTimeout(function () { el.btnCopySync.textContent = "复制命令"; }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done).catch(function () {

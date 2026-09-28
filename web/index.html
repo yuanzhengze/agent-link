@@ -12,36 +12,36 @@
   <!-- Authentication ---------------------------------------------------- -->
   <main id="view-auth" class="auth-view">
     <section class="auth-card">
-      <h1>Sign in to cowork</h1>
+      <h1 id="auth-title">登录 cowork</h1>
       <form id="form-login">
-        <label>Username
+        <label>用户名
           <input id="input-login-username" autocomplete="username" required>
         </label>
-        <label>Password
+        <label>密码
           <input id="input-login-password" type="password"
                  autocomplete="current-password" minlength="10" required>
         </label>
-        <button type="submit">Sign in</button>
-        <p class="auth-switch">No account?
-          <button id="btn-show-register" class="link-btn" type="button">Create one</button>
+        <button type="submit">登录</button>
+        <p class="auth-switch">没有账号？
+          <button id="btn-show-register" class="link-btn" type="button">创建账号</button>
         </p>
       </form>
       <form id="form-register" class="hidden">
-        <label>Username
+        <label>用户名
           <input id="input-register-username" autocomplete="username" required>
         </label>
-        <label>Password
+        <label>密码
           <input id="input-register-password" type="password"
                  autocomplete="new-password" minlength="10" required>
         </label>
-        <p class="field-hint">At least 10 characters.</p>
-        <label>Confirm password
+        <p class="field-hint">至少 10 个字符</p>
+        <label>确认密码
           <input id="input-register-confirm" type="password"
                  autocomplete="new-password" minlength="10" required>
         </label>
-        <button type="submit">Create account</button>
-        <p class="auth-switch">Have an account?
-          <button id="btn-show-login" class="link-btn" type="button">Sign in</button>
+        <button type="submit">创建账号</button>
+        <p class="auth-switch">已有账号？
+          <button id="btn-show-login" class="link-btn" type="button">去登录</button>
         </p>
       </form>
       <form id="form-change-password" class="hidden">
@@ -64,17 +64,17 @@
   <!-- Team onboarding --------------------------------------------------- -->
   <main id="view-onboarding" class="view hidden">
     <section class="onboarding-card">
-      <h1>Choose a team</h1>
+      <h1>选择团队</h1>
       <form id="form-create-team">
-        <input id="input-team-name" placeholder="Team name" required>
-        <button type="submit">Create team</button>
+        <input id="input-team-name" placeholder="团队名称" required>
+        <button type="submit">创建团队</button>
       </form>
-      <div class="onboarding-sep">or</div>
+      <div class="onboarding-sep">或</div>
       <form id="form-join-team">
-        <p class="field-hint">Joining needs both the team ID and the invite code.</p>
-        <input id="input-team-id" placeholder="Team ID (tm_xxxxxxxx)" required>
-        <input id="input-invite-code" type="password" placeholder="Invite code" required>
-        <button type="submit">Join team</button>
+        <p class="field-hint">加入需要团队 ID 和邀请码</p>
+        <input id="input-team-id" placeholder="团队 ID（tm_xxxxxxxx）" required>
+        <input id="input-invite-code" type="password" placeholder="邀请码" required>
+        <button type="submit">加入团队</button>
       </form>
       <p id="onboarding-error" class="auth-error hidden"></p>
     </section>
@@ -105,12 +105,12 @@
       <div class="view-header">
         <h1>Projects</h1>
         <div>
-          <button id="btn-new-project" class="btn-secondary" type="button">New project</button>
+          <button id="btn-new-project" class="btn-secondary" type="button">新建项目</button>
           <button id="btn-refresh-projects" class="btn-secondary" type="button">Refresh</button>
         </div>
       </div>
       <ul id="project-list" class="project-list"></ul>
-      <p id="project-list-empty" class="empty-hint hidden">No projects yet. Create one, then sync a static prototype from the CLI.</p>
+      <p id="project-list-empty" class="empty-hint hidden">还没有项目。先创建一个，再用 CLI 同步静态原型。</p>
     </main>
 
     <main id="view-project" class="view hidden">
@@ -122,10 +122,9 @@
           </div>
           <ul id="file-tree" class="file-tree"></ul>
           <div id="file-tree-empty" class="empty-hint hidden">
-            <p>No files yet.</p>
-            <p>On a machine logged into this team, sync a static prototype:</p>
+            <p>用 CLI 同步静态原型</p>
             <pre id="file-sync-command" class="sync-command"></pre>
-            <p>Then refresh. Right-click a file to lock it so two people do not overwrite each other.</p>
+            <p>然后刷新。右键文件可加锁，避免两人互相覆盖</p>
           </div>
         </section>
 
@@ -135,11 +134,11 @@
           </div>
           <p id="preview-error" class="preview-error hidden"></p>
           <div id="preview-empty" class="preview-empty">
-            <p id="preview-empty-lead">Nothing to preview yet.</p>
-            <p>Sync a static prototype from the CLI. This pane stays on these instructions until <code>index.html</code> is more than the starter page.</p>
+            <p id="preview-empty-lead">还没有可预览的内容</p>
+            <p>用 CLI 同步静态原型</p>
             <pre id="preview-sync-command" class="sync-command"></pre>
-            <button id="btn-copy-sync" class="btn-secondary btn-small" type="button">Copy commands</button>
-            <p>Then refresh. Right-click a file to lock it so two people do not overwrite each other.</p>
+            <button id="btn-copy-sync" class="btn-secondary btn-small" type="button">复制命令</button>
+            <p>然后刷新。右键文件可加锁，避免两人互相覆盖</p>
           </div>
           <iframe id="preview-frame" class="preview-frame hidden" title="Live preview"
                   sandbox="allow-scripts allow-forms allow-popups allow-modals"
@@ -185,13 +184,13 @@
 <div id="invite-modal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-header">
-      <h2>Invite code</h2>
-      <button id="btn-invite-close" class="link-btn" type="button">Close</button>
+      <h2>邀请码</h2>
+      <button id="btn-invite-close" class="link-btn" type="button">关闭</button>
     </div>
-    <p class="modal-note">Share this once. It will not be shown again. Joining needs both lines.</p>
+    <p class="modal-note">只显示一次，加入需要这两行</p>
     <textarea id="invite-pair" class="invite-pair" readonly rows="2"></textarea>
     <div class="modal-actions">
-      <button id="btn-copy-invite" class="btn-secondary btn-small" type="button">Copy team ID and code</button>
+      <button id="btn-copy-invite" class="btn-secondary btn-small" type="button">复制团队 ID 和邀请码</button>
     </div>
   </div>
 </div>
@@ -200,18 +199,18 @@
 <div id="project-modal" class="modal hidden">
   <div class="modal-card" role="dialog" aria-labelledby="project-modal-title">
     <div class="modal-header">
-      <h2 id="project-modal-title">New project</h2>
-      <button id="btn-project-close" class="link-btn" type="button">Close</button>
+      <h2 id="project-modal-title">新建项目</h2>
+      <button id="btn-project-close" class="link-btn" type="button">关闭</button>
     </div>
-    <p class="modal-note">Creates an empty project. Sync a static prototype into it to see a preview.</p>
+    <p class="modal-note">会创建一个空项目，用 CLI 同步静态原型后才能预览</p>
     <form id="form-new-project">
-      <label>Project name
+      <label>项目名称
         <input id="input-project-name" autocomplete="off" required>
       </label>
       <p id="project-modal-error" class="auth-error hidden"></p>
       <div class="modal-actions">
-        <button id="btn-project-cancel" class="btn-secondary" type="button">Cancel</button>
-        <button class="btn-primary" type="submit">Create project</button>
+        <button id="btn-project-cancel" class="btn-secondary" type="button">取消</button>
+        <button class="btn-primary" type="submit">创建项目</button>
       </div>
     </form>
   </div>
