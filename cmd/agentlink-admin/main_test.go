@@ -77,7 +77,9 @@ func uniqueTestUsername(t *testing.T) string {
 
 func setupUserWithSessions(t *testing.T) (*auth.Service, *auth.Store, *redis.Client, auth.User, string, auth.WebLoginResult, auth.DeviceLoginResult) {
 	t.Helper()
-	clock := fixedClock{t: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	// Align with Redis TIME. A frozen date falls outside the 7-day web-session
+	// absolute TTL and Register reports the new session as already expired.
+	clock := fixedClock{t: time.Now().UTC().Truncate(time.Millisecond)}
 	rdb := newTestRedis(t)
 	store := auth.NewStore(rdb)
 	svc := auth.NewService(store, clock)

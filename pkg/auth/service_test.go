@@ -19,6 +19,14 @@ type FixedClock struct{ T time.Time }
 
 func (c FixedClock) Now() time.Time { return c.T }
 
+// redisNowClock stays aligned with Redis TIME. Web session creation rejects an
+// absolute expiry that is already in the past relative to the Redis server, so
+// a frozen historical timestamp fails once it is more than WebSessionAbsoluteTTL
+// behind the machine clock.
+func redisNowClock() FixedClock {
+	return FixedClock{T: time.Now().UTC().Truncate(time.Millisecond)}
+}
+
 func newAuthService(t *testing.T, clock Clock) (*Service, *Store, *redis.Client) {
 	t.Helper()
 	store, rdb := newAuthTestStore(t)
@@ -114,7 +122,7 @@ func assertRedisStoresOnlyHash(t *testing.T, rdb *redis.Client, secret string) {
 }
 
 func TestServiceRegisterHashesPassword(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -157,7 +165,7 @@ func TestServiceRegisterHashesPassword(t *testing.T) {
 }
 
 func TestServiceRotateWebCSRF(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	registerServiceUser(t, svc, username, "correct horse battery staple")
@@ -189,7 +197,7 @@ func TestServiceRotateWebCSRF(t *testing.T) {
 }
 
 func TestServiceResolveDeviceSessionLoadsDeviceName(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	registerServiceUser(t, svc, username, "correct horse battery staple")
@@ -205,7 +213,7 @@ func TestServiceResolveDeviceSessionLoadsDeviceName(t *testing.T) {
 }
 
 func TestServiceLoginReturnsGenericInvalidCredentials(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -234,7 +242,7 @@ func TestServiceLoginReturnsGenericInvalidCredentials(t *testing.T) {
 }
 
 func TestServiceLoginRateLimitFiveFailures(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -276,7 +284,7 @@ func TestServiceLoginRateLimitFiveFailures(t *testing.T) {
 }
 
 func TestServiceChangePasswordRevokesAllSessions(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	oldPassword := "correct horse battery staple"
@@ -306,7 +314,7 @@ func TestServiceChangePasswordRevokesAllSessions(t *testing.T) {
 }
 
 func TestServiceDeviceLoginCreatesOwnedDevice(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -348,7 +356,7 @@ func TestServiceDeviceLoginCreatesOwnedDevice(t *testing.T) {
 }
 
 func TestServiceResetPasswordRequiresChangeAndRevokesSessions(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -656,7 +664,7 @@ func TestDeviceCredentialAtomicCreateFailureLeavesNoResidue(t *testing.T) {
 }
 
 func TestDeviceCredentialResolveRejectsMissingOrMismatchedDevice(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -737,7 +745,7 @@ func TestDeviceCredentialNaturalExpiryKeepsDeviceRecord(t *testing.T) {
 }
 
 func TestDeviceCredentialLogoutClearsEverything(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	username := uniqueTestUsername(t)
 	password := "correct horse battery staple"
@@ -813,7 +821,7 @@ func secretHash(secret string) string {
 }
 
 func TestCreateTeamMakesCreatorOwner(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	result, err := svc.CreateTeam(context.Background(), owner.ID, "  Core Team  ")
@@ -836,7 +844,7 @@ func TestCreateTeamMakesCreatorOwner(t *testing.T) {
 }
 
 func TestJoinTeamRequiresCurrentInvite(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -854,7 +862,7 @@ func TestJoinTeamRequiresCurrentInvite(t *testing.T) {
 }
 
 func TestRotateInviteInvalidatesPreviousCode(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -876,7 +884,7 @@ func TestRotateInviteInvalidatesPreviousCode(t *testing.T) {
 }
 
 func TestAdminCanRemoveMemberButNotAdminOrOwner(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -908,7 +916,7 @@ func TestAdminCanRemoveMemberButNotAdminOrOwner(t *testing.T) {
 }
 
 func TestOwnerCanPromoteAndDemoteAdmin(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -932,7 +940,7 @@ func TestOwnerCanPromoteAndDemoteAdmin(t *testing.T) {
 }
 
 func TestOwnerMustTransferBeforeLeaving(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	result := createTestTeam(t, svc, owner, "Owner Leave")
@@ -942,7 +950,7 @@ func TestOwnerMustTransferBeforeLeaving(t *testing.T) {
 }
 
 func TestAdminAndMemberCanLeaveTeam(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -971,7 +979,7 @@ func TestAdminAndMemberCanLeaveTeam(t *testing.T) {
 }
 
 func TestTransferOwnerIsAtomic(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newAuthService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	successor := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
