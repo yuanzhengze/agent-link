@@ -86,11 +86,11 @@
   }
 
   function errorText(res) {
-    if (res.status === 401) return "Invalid username or password.";
-    if (res.status === 409) return "That username is already taken.";
-    if (res.status === 429) return "Too many attempts. Please wait a few minutes.";
+    if (res.status === 401) return "用户名或密码不正确。";
+    if (res.status === 409) return "该用户名已被占用。";
+    if (res.status === 429) return "尝试次数过多，请稍后再试。";
     if (res.body && res.body.error) return res.body.error;
-    return "Request failed (" + res.status + ").";
+    return "请求失败（" + res.status + "）。";
   }
 
   window.CoworkAuth = {

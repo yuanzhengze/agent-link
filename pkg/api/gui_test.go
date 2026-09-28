@@ -41,8 +41,23 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`id="form-new-project"`,
 		`id="preview-empty"`,
 		`id="invite-pair"`,
-		`At least 10 characters.`,
-		`Joining needs both the team ID and the invite code.`,
+		`至少 10 个字符`,
+		`登录 cowork`,
+		`创建账号`,
+		`已有账号？`,
+		`去登录`,
+		`选择团队`,
+		`加入需要团队 ID 和邀请码`,
+		`加入团队`,
+		`还没有项目。先创建一个，再用 CLI 同步静态原型。`,
+		`还没有可预览的内容`,
+		`用 CLI 同步静态原型`,
+		`复制命令`,
+		`然后刷新。右键文件可加锁，避免两人互相覆盖`,
+		`新建项目`,
+		`会创建一个空项目，用 CLI 同步静态原型后才能预览`,
+		`只显示一次，加入需要这两行`,
+		`复制团队 ID 和邀请码`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
@@ -97,10 +112,23 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 	if !strings.Contains(dash, "/snapshot") {
 		t.Error("dashboard.js must read the starter page before previewing it")
 	}
+	for _, marker := range []string{
+		"还没有可预览的内容",
+		"目前只有起始页",
+		"复制命令",
+	} {
+		if !strings.Contains(dash, marker) {
+			t.Errorf("dashboard.js missing empty-state copy %q", marker)
+		}
+	}
 	teamsJS := getGUIAsset(t, "/teams.js")
 	for _, marker := range []string{
 		"Team ID: ",
 		"Invite code: ",
+		`团队\\s*id`,
+		"邀请码",
+		"parseInvitePair",
+		"addEventListener(\"paste\"",
 	} {
 		if !strings.Contains(teamsJS, marker) {
 			t.Errorf("teams.js missing invite pair marker %q", marker)

@@ -1,10 +1,44 @@
 // Team onboarding, switching, and (Task 3) member administration for the cowork
 // GUI. Only the non-sensitive current team id is persisted; invite codes are
 // shown once and never stored.
-(function () {
+(function (root) {
   "use strict";
 
-  var api = window.CoworkAPI;
+  function invitePairText(teamID, code) {
+    return "Team ID: " + teamID + "\nInvite code: " + code;
+  }
+
+  // parseInvitePair splits one pasted block into the two join fields.
+  // English labels (Team ID / Invite code) and Chinese labels (团队 ID / 邀请码)
+  // are both accepted, with ":" or "：". Missing either label returns null so a
+  // normal single-value paste is left alone.
+  function parseInvitePair(text) {
+    if (text == null) return null;
+    var src = String(text).replace(/^\uFEFF/, "").replace(/[\u00a0\u3000]/g, " ");
+    var teamID = captureLabeled(src, "(?:team\\s*id|团队\\s*id)");
+    var inviteCode = captureLabeled(src, "(?:invite\\s*code|邀请码)");
+    if (!teamID || !inviteCode) return null;
+    return { teamID: cleanToken(teamID), inviteCode: cleanToken(inviteCode) };
+  }
+
+  function captureLabeled(src, label) {
+    var match = src.match(new RegExp(label + "\\s*[:：]\\s*(\\S+)", "i"));
+    return match ? match[1] : null;
+  }
+
+  function cleanToken(token) {
+    return String(token).replace(/[,，.。;；]+$/g, "");
+  }
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      parseInvitePair: parseInvitePair,
+      invitePairText: invitePairText
+    };
+  }
+  if (!root || !root.document) return;
+
+  var api = root.CoworkAPI;
   var LS_TEAM = "cowork_current_team_id";
 
   var teams = [];
@@ -98,7 +132,7 @@
           return { ok: true };
         });
       }
-      return { ok: false, error: (res.body && res.body.error) || ("Create failed (" + res.status + ")") };
+      return { ok: false, error: (res.body && res.body.error) || ("创建失败（" + res.status + "）") };
     });
   }
 
@@ -113,20 +147,32 @@
           return { ok: true };
         });
       }
-      return { ok: false, error: (res.body && res.body.error) || ("Join failed (" + res.status + ")") };
+      return { ok: false, error: (res.body && res.body.error) || ("加入失败（" + res.status + "）") };
     });
   }
 
   // ---- invite modal ------------------------------------------------------
 
-  function invitePairText(teamID, code) {
-    return "Team ID: " + teamID + "\nInvite code: " + code;
+  function applyInvitePair(parsed) {
+    if (!parsed) return;
+    if (el.inputTeamID) el.inputTeamID.value = parsed.teamID;
+    if (el.inputInvite) el.inputInvite.value = parsed.inviteCode;
+  }
+
+  function onJoinFieldPaste(ev) {
+    var data = ev.clipboardData || window.clipboardData;
+    if (!data) return;
+    var text = data.getData("text/plain") || data.getData("text") || "";
+    var parsed = parseInvitePair(text);
+    if (!parsed) return;
+    ev.preventDefault();
+    applyInvitePair(parsed);
   }
 
   function showInviteModal(teamID, code) {
     if (!el.inviteModal) return;
     if (el.invitePair) el.invitePair.value = invitePairText(teamID, code);
-    if (el.btnCopyInvite) el.btnCopyInvite.textContent = "Copy team ID and code";
+    if (el.btnCopyInvite) el.btnCopyInvite.textContent = "复制团队 ID 和邀请码";
     el.inviteModal.classList.remove("hidden");
   }
 
@@ -140,8 +186,8 @@
     var text = el.invitePair ? el.invitePair.value : "";
     if (!text) return;
     var done = function () {
-      el.btnCopyInvite.textContent = "Copied";
-      setTimeout(function () { el.btnCopyInvite.textContent = "Copy team ID and code"; }, 1500);
+      el.btnCopyInvite.textContent = "已复制";
+      setTimeout(function () { el.btnCopyInvite.textContent = "复制团队 ID 和邀请码"; }, 1500);
     };
     var fallback = function () {
       el.invitePair.focus();
@@ -360,6 +406,8 @@
 
   if (el.btnInviteClose) el.btnInviteClose.addEventListener("click", hideInviteModal);
   if (el.btnCopyInvite) el.btnCopyInvite.addEventListener("click", copyInvitePair);
+  if (el.inputTeamID) el.inputTeamID.addEventListener("paste", onJoinFieldPaste);
+  if (el.inputInvite) el.inputInvite.addEventListener("paste", onJoinFieldPaste);
 
   window.CoworkTeams = {
     load: load,
@@ -369,5 +417,6 @@
     current: current,
     all: all,
     openMembers: openMembers,
+    parseInvitePair: parseInvitePair,
   };
-})();
+})(typeof window !== "undefined" ? window : undefined);

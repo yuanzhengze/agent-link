@@ -14,6 +14,7 @@
     viewOnboarding: document.getElementById("view-onboarding"),
     viewApp: document.getElementById("view-app"),
 
+    authTitle: document.getElementById("auth-title"),
     formLogin: document.getElementById("form-login"),
     formRegister: document.getElementById("form-register"),
     formChangePassword: document.getElementById("form-change-password"),
@@ -46,11 +47,16 @@
     show(view);
   }
 
+  function setAuthTitle(text) {
+    if (el.authTitle) el.authTitle.textContent = text;
+  }
+
   function showLoginForm() {
     showOnly(el.viewAuth);
     show(el.formLogin);
     hide(el.formRegister);
     hide(el.formChangePassword);
+    setAuthTitle("登录 cowork");
     clearAuthError();
   }
 
@@ -59,6 +65,7 @@
     hide(el.formLogin);
     show(el.formRegister);
     hide(el.formChangePassword);
+    setAuthTitle("创建账号");
     clearAuthError();
   }
 
@@ -67,6 +74,7 @@
     hide(el.formLogin);
     hide(el.formRegister);
     show(el.formChangePassword);
+    setAuthTitle("Sign in to cowork");
     clearAuthError();
   }
 
@@ -106,7 +114,7 @@
     ev.preventDefault();
     clearAuthError();
     if (el.registerPassword.value !== el.registerConfirm.value) {
-      showAuthError("Passwords do not match.");
+      showAuthError("两次密码不一致。");
       return;
     }
     auth.register(el.registerUsername.value.trim(), el.registerPassword.value).then(function (res) {
