@@ -150,7 +150,7 @@
             <h2>在线</h2>
           </div>
           <ul id="online-panel" class="online-panel"></ul>
-          <p id="online-panel-empty" class="empty-hint hidden">No agents seen yet.</p>
+          <p id="online-panel-empty" class="empty-hint hidden">还没有在线成员。</p>
 
           <div class="pane-header pane-header-alerts">
             <h2>告警</h2>
@@ -168,13 +168,13 @@
 <div id="members-modal" class="modal hidden">
   <div class="modal-card">
     <div class="modal-header">
-      <h2>Team members</h2>
-      <button id="btn-members-close" class="link-btn" type="button">Close</button>
+      <h2>团队成员</h2>
+      <button id="btn-members-close" class="link-btn" type="button">关闭</button>
     </div>
     <ul id="member-list" class="member-list"></ul>
     <div class="modal-actions">
-      <button id="btn-rotate-invite" class="btn-secondary btn-small hidden" type="button">Rotate invite code</button>
-      <button id="btn-leave-team" class="btn-danger btn-small" type="button">Leave team</button>
+      <button id="btn-rotate-invite" class="btn-secondary btn-small hidden" type="button">轮换邀请码</button>
+      <button id="btn-leave-team" class="btn-danger btn-small" type="button">离开团队</button>
     </div>
     <p id="members-error" class="auth-error hidden"></p>
   </div>
@@ -217,9 +217,10 @@
 </div>
 
 <div id="context-menu" class="context-menu hidden">
-  <button data-action="acquire" type="button">Acquire lock</button>
-  <button data-action="release" type="button">Release lock</button>
-  <button data-action="force-release" type="button">Force release / take over</button>
+  <button data-action="acquire" type="button">获取锁</button>
+  <button data-action="release" type="button">释放锁</button>
+  <button data-action="force-release" type="button">强制释放</button>
+  <button data-action="force-release" type="button">接管</button>
 </div>
 
 <script src="/api.js"></script>

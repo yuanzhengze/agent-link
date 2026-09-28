@@ -72,6 +72,15 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`<h2>在线</h2>`,
 		`<h2>告警</h2>`,
 		`id="btn-clear-alerts" class="btn-secondary btn-small" type="button">清除</button>`,
+		`<h2>团队成员</h2>`,
+		`id="btn-members-close" class="link-btn" type="button">关闭</button>`,
+		`id="btn-rotate-invite" class="btn-secondary btn-small hidden" type="button">轮换邀请码</button>`,
+		`id="btn-leave-team" class="btn-danger btn-small" type="button">离开团队</button>`,
+		`data-action="acquire" type="button">获取锁</button>`,
+		`data-action="release" type="button">释放锁</button>`,
+		`data-action="force-release" type="button">强制释放</button>`,
+		`data-action="force-release" type="button">接管</button>`,
+		`id="online-panel-empty" class="empty-hint hidden">还没有在线成员。</p>`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
@@ -91,6 +100,14 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`<h2>Online</h2>`,
 		`<h2>Alerts</h2>`,
 		`>Clear</button>`,
+		`<h2>Team members</h2>`,
+		`>Close</button>`,
+		`>Rotate invite code</button>`,
+		`>Leave team</button>`,
+		`>Acquire lock</button>`,
+		`>Release lock</button>`,
+		`Force release / take over`,
+		`No agents seen yet.`,
 	} {
 		if strings.Contains(body, gone) {
 			t.Errorf("GUI still has English chrome %s", gone)
@@ -165,6 +182,43 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 	} {
 		if !strings.Contains(teamsJS, marker) {
 			t.Errorf("teams.js missing invite pair marker %q", marker)
+		}
+	}
+	for _, marker := range []string{
+		"离开前请先转让所有权",
+		"离开团队",
+		"加载成员失败",
+		"设为管理员",
+		"设为成员",
+		"移除",
+		"转让所有权",
+		"确认移除 ",
+		"确认转让给 ",
+		"你将成为管理员。",
+		"确认离开 ",
+		"操作失败",
+	} {
+		if !strings.Contains(teamsJS, marker) {
+			t.Errorf("teams.js missing members copy %q", marker)
+		}
+	}
+	for _, gone := range []string{
+		"Transfer ownership before leaving",
+		"Leave team",
+		"Failed to load members",
+		"Make admin",
+		"Make member",
+		"Transfer ownership",
+		"Remove ",
+		"from the team?",
+		"You will become an admin.",
+		"Action failed",
+		"Transfer failed",
+		"Rotate failed",
+		"Leave failed",
+	} {
+		if strings.Contains(teamsJS, gone) {
+			t.Errorf("teams.js still has English members copy %q", gone)
 		}
 	}
 }
