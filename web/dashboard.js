@@ -35,6 +35,7 @@
     fileTreeEmpty: document.getElementById("file-tree-empty"),
 
     previewFrame: document.getElementById("preview-frame"),
+    previewError: document.getElementById("preview-error"),
 
     onlinePanel: document.getElementById("online-panel"),
     onlinePanelEmpty: document.getElementById("online-panel-empty"),
@@ -132,9 +133,7 @@
     el.viewProjects.classList.add("hidden");
     el.viewProject.classList.remove("hidden");
 
-    el.previewFrame.src = "/preview/" +
-      encodeURIComponent(state.team.id) + "/" +
-      encodeURIComponent(id) + "/";
+    loadPreview();
 
     loadTree();
     loadAgents();
@@ -149,6 +148,47 @@
     el.viewProject.classList.add("hidden");
     el.viewProjects.classList.remove("hidden");
     el.previewFrame.src = "about:blank";
+    clearPreviewError();
+  }
+
+  function showPreviewError(msg) {
+    if (!el.previewError) return;
+    el.previewError.textContent = msg;
+    el.previewError.classList.remove("hidden");
+  }
+
+  function clearPreviewError() {
+    if (!el.previewError) return;
+    el.previewError.textContent = "";
+    el.previewError.classList.add("hidden");
+  }
+
+  // Ask the server for the preview URL. When isolation is on, that URL is on
+  // a different origin and carries a read-only grant, so prototype scripts
+  // cannot use the viewer's session. The same-origin fallback is
+  // /preview/<team>/<project>/ and is only returned when isolation is off.
+  function loadPreview() {
+    if (!state.team || !state.currentProjectId || !el.previewFrame) return;
+    var projectId = state.currentProjectId;
+    api.request(teamURL("/projects/" + encodeURIComponent(projectId) + "/preview-grant"), {
+      method: "POST",
+      body: "{}"
+    }).then(function (res) {
+      if (state.currentProjectId !== projectId) return;
+      if (!res.ok || !res.body || !res.body.bootstrap_url) {
+        showPreviewError((res.body && res.body.error) || ("Preview failed (" + res.status + ")"));
+        el.previewFrame.src = "about:blank";
+        return;
+      }
+      clearPreviewError();
+      if (res.body.isolated) {
+        el.previewFrame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+        el.previewFrame.setAttribute("referrerpolicy", "no-referrer");
+      } else {
+        el.previewFrame.removeAttribute("sandbox");
+      }
+      el.previewFrame.src = res.body.bootstrap_url;
+    });
   }
 
   // ---- file tree + locks -------------------------------------------------
@@ -362,10 +402,8 @@
   }
 
   function reloadPreview() {
-    if (el.previewFrame && el.previewFrame.src && el.previewFrame.src !== "about:blank") {
-      // Reassigning src forces the iframe to refetch the freshly-committed file.
-      el.previewFrame.src = el.previewFrame.src;
-    }
+    // Mint a fresh grant so a reload does not reuse an expired capability.
+    loadPreview();
   }
 
   // ---- wiring ------------------------------------------------------------

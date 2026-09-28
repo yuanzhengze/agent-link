@@ -125,7 +125,10 @@
           <div class="pane-header">
             <h2>Preview</h2>
           </div>
-          <iframe id="preview-frame" class="preview-frame" title="Live preview"></iframe>
+          <p id="preview-error" class="preview-error hidden"></p>
+          <iframe id="preview-frame" class="preview-frame" title="Live preview"
+                  sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                  referrerpolicy="no-referrer"></iframe>
         </section>
 
         <section class="pane pane-side">

@@ -726,6 +726,10 @@ func TestNewWithOptionsCookieTransport(t *testing.T) {
 			publicURL: "http://LOCALHOST:8080",
 		},
 		{
+			name:      "localhost subdomain insecure allowed",
+			publicURL: "http://preview.localhost:8080",
+		},
+		{
 			name:      "IPv4 loopback insecure allowed",
 			publicURL: "http://127.0.0.1:8080",
 		},

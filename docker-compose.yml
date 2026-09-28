@@ -7,6 +7,9 @@ services:
       - REDIS_ADDR=redis:6379
       # Public HTTPS origin (sets cookie scope). Terminate TLS at your proxy.
       - PUBLIC_URL=${PUBLIC_URL:-https://cowork.example}
+      # Second origin for prototype HTML. Unset keeps same-origin preview.
+      # Example: https://preview.example
+      - PREVIEW_PUBLIC_URL=${PREVIEW_PUBLIC_URL:-}
       - COOKIE_SECURE=${COOKIE_SECURE:-true}
       - DATA_DIR=/data/projects
     volumes:

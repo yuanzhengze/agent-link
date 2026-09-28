@@ -322,6 +322,14 @@ button:hover {
   background: #fff;
 }
 
+.preview-error {
+  margin: 0;
+  padding: 8px 14px;
+  color: var(--amber);
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
 /* online panel */
 
 .online-panel {

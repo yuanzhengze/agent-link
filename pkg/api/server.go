@@ -16,11 +16,12 @@ import (
 )
 
 type ServerOptions struct {
-	Addr         string
-	DataDir      string
-	Redis        *redis.Client
-	CookieSecure bool
-	PublicURL    string
+	Addr             string
+	DataDir          string
+	Redis            *redis.Client
+	CookieSecure     bool
+	PublicURL        string
+	PreviewPublicURL string
 }
 
 type Server struct {
@@ -33,6 +34,7 @@ type Server struct {
 	authService           *auth.Service
 	cookieSecure          bool
 	publicOrigin          string
+	previewOrigin         string
 	projectIDGenerator    func() string
 	projectTokenGenerator func() (string, error)
 	projectGitInitializer func(string) (string, error)
@@ -53,9 +55,7 @@ func parsePublicOrigin(raw string, cookieSecure bool) (string, error) {
 		return "", fmt.Errorf("invalid public URL: path not allowed")
 	}
 
-	hostname := u.Hostname()
-	ip := net.ParseIP(hostname)
-	isLoopback := strings.EqualFold(hostname, "localhost") || ip != nil && ip.IsLoopback()
+	isLoopback := isLoopbackHost(u.Hostname())
 	if cookieSecure && u.Scheme != "https" {
 		return "", fmt.Errorf("invalid cookie transport: secure cookies require HTTPS")
 	}
@@ -66,10 +66,29 @@ func parsePublicOrigin(raw string, cookieSecure bool) (string, error) {
 	return u.Scheme + "://" + u.Host, nil
 }
 
+func isLoopbackHost(hostname string) bool {
+	host := strings.TrimSuffix(strings.ToLower(hostname), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(hostname)
+	return ip != nil && ip.IsLoopback()
+}
+
 func NewWithOptions(opts ServerOptions) *Server {
 	publicOrigin, err := parsePublicOrigin(opts.PublicURL, opts.CookieSecure)
 	if err != nil {
 		panic(err)
+	}
+	previewOrigin := ""
+	if strings.TrimSpace(opts.PreviewPublicURL) != "" {
+		previewOrigin, err = parsePublicOrigin(opts.PreviewPublicURL, opts.CookieSecure)
+		if err != nil {
+			panic(fmt.Errorf("invalid preview URL: %w", err))
+		}
+		if previewOrigin == publicOrigin {
+			panic("invalid preview URL: PREVIEW_PUBLIC_URL must be a different origin from PUBLIC_URL (set PREVIEW_PUBLIC_URL=off to keep same-origin preview)")
+		}
 	}
 
 	store := auth.NewStore(opts.Redis)
@@ -82,6 +101,7 @@ func NewWithOptions(opts ServerOptions) *Server {
 		authService:           authService,
 		cookieSecure:          opts.CookieSecure,
 		publicOrigin:          publicOrigin,
+		previewOrigin:         previewOrigin,
 		projectIDGenerator:    generateID,
 		projectTokenGenerator: generateProjectCreationTokenV2,
 		projectGitInitializer: initializeProjectGitV2,
@@ -132,9 +152,16 @@ func NewWithOptions(opts ServerOptions) *Server {
 
 	s.hubV2 = NewHubV2()
 	s.mux.Handle("GET /api/teams/{team_id}/ws", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleWSV2))))
+	s.mux.Handle("POST /api/teams/{team_id}/projects/{project_id}/preview-grant", s.requireIdentity(s.requireTeamRole()(http.HandlerFunc(s.handleIssuePreviewGrant))))
 	// Team-scoped preview: authenticated team members only. This is the canonical
 	// form now that the v1 /preview/{id} route (which the transitional
 	// /preview/teams/... form was introduced to avoid shadowing) is gone.
+	// When a distinct preview origin is configured, member HTML is served only
+	// from the grant routes below, on that origin. The cookie route stays for
+	// same-origin deployments and returns 404 once isolation is on.
+	s.mux.HandleFunc("GET /preview/{team_id}/{project_id}/g/{grant}/ws", s.handlePreviewGrantWS)
+	s.mux.HandleFunc("GET /preview/{team_id}/{project_id}/g/{grant}/{$}", s.handlePreviewGrant)
+	s.mux.HandleFunc("GET /preview/{team_id}/{project_id}/g/{grant}/{path...}", s.handlePreviewGrant)
 	s.mux.HandleFunc("GET /preview/{team_id}/{project_id}/{path...}", s.handlePreviewV2)
 
 	s.mux.Handle("GET /", http.FileServer(http.FS(web.FS)))
@@ -171,6 +198,10 @@ func (s *Server) ListenAndServe(addr string) error {
 		Handler: s.mux,
 	}
 	fmt.Printf("API server listening on %s\n", addr)
+	if s.previewIsolated() {
+		fmt.Printf("preview origin %s (read-only, separate from %s)\n", s.previewOrigin, s.publicOrigin)
+		fmt.Printf("open the GUI at %s — preview HTML is not served on that host\n", s.publicOrigin)
+	}
 	return s.srv.ListenAndServe()
 }
 

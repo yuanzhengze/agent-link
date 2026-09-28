@@ -35,6 +35,9 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`id="input-login-username"`,
 		`id="input-register-password"`,
 		`id="form-change-password"`,
+		`id="preview-frame"`,
+		`sandbox="allow-scripts allow-forms allow-popups allow-modals"`,
+		`referrerpolicy="no-referrer"`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
@@ -61,6 +64,8 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 		"/agents",
 		"/ws?project=",
 		"/preview/",
+		"preview-grant",
+		"isolated",
 	} {
 		if !strings.Contains(dash, marker) {
 			t.Errorf("dashboard.js missing team-scoped route %q", marker)
