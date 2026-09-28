@@ -91,6 +91,12 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 	if !strings.Contains(dash, "agentlink sync ") {
 		t.Error("dashboard.js missing sync command guidance")
 	}
+	if !strings.Contains(dash, seedIndexHTML) {
+		t.Error("dashboard.js starter page no longer matches seedIndexHTML")
+	}
+	if !strings.Contains(dash, "/snapshot") {
+		t.Error("dashboard.js must read the starter page before previewing it")
+	}
 	teamsJS := getGUIAsset(t, "/teams.js")
 	for _, marker := range []string{
 		"Team ID: ",

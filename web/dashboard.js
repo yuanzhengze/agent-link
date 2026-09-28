@@ -7,11 +7,26 @@
 
   var api = window.CoworkAPI;
 
+  // Must match pkg/api seedIndexHTML. A brand-new project commits this file,
+  // which is not a synced prototype.
+  var SEED_INDEX_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>New Project</title>
+</head>
+<body>
+  <h1>New Project</h1>
+</body>
+</html>
+`;
+
   var state = {
     team: null,
     currentProjectId: null,
     currentProjectName: "",
     hasIndex: false,
+    treeEpoch: 0,
     ws: null,
     wsReconnectTimer: null,
     wsReconnectDelay: 1000,
@@ -212,9 +227,9 @@
     return "agentlink team use " + teamID + "\nagentlink sync " + projectID + " ./prototype";
   }
 
-  function showPreviewWaiting() {
+  function showPreviewWaiting(lead) {
     if (el.previewEmptyLead) {
-      el.previewEmptyLead.textContent = "Nothing to preview yet.";
+      el.previewEmptyLead.textContent = lead || "Nothing to preview yet.";
     }
     if (el.fileSyncCommand) el.fileSyncCommand.textContent = syncCommands();
     if (el.previewSyncCommand) el.previewSyncCommand.textContent = syncCommands();
@@ -225,7 +240,36 @@
     }
   }
 
+  function revealPreview() {
+    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
+    if (el.previewFrame) el.previewFrame.classList.remove("hidden");
+    if (!el.previewFrame.src || el.previewFrame.src === "about:blank") loadPreview();
+  }
+
+  function isSeedIndex(content) {
+    return content === SEED_INDEX_HTML;
+  }
+
+  function confirmNotSeed(epoch, projectId) {
+    api.request(teamURL("/projects/" + encodeURIComponent(projectId) + "/snapshot")).then(function (res) {
+      if (state.treeEpoch !== epoch || state.currentProjectId !== projectId) return;
+      var files = (res.ok && res.body && res.body.files) || [];
+      var index = null;
+      files.forEach(function (f) {
+        if (f.path === "index.html") index = f;
+      });
+      if (res.ok && files.length === 1 && index && isSeedIndex(index.content)) {
+        state.hasIndex = false;
+        showPreviewWaiting("Starter page only.");
+        return;
+      }
+      state.hasIndex = true;
+      revealPreview();
+    });
+  }
+
   function updateEmptyState(files) {
+    var epoch = ++state.treeEpoch;
     var hasIndex = files.some(function (f) {
       return f.path === "index.html" || f.path === "index.htm";
     });
@@ -235,21 +279,16 @@
     if (el.previewSyncCommand) el.previewSyncCommand.textContent = commands;
     if (el.fileTreeEmpty) el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
     if (!hasIndex) {
-      if (el.previewEmptyLead) {
-        el.previewEmptyLead.textContent = files.length
-          ? "No index.html yet."
-          : "Nothing to preview yet.";
-      }
-      if (el.previewEmpty) el.previewEmpty.classList.remove("hidden");
-      if (el.previewFrame) {
-        el.previewFrame.classList.add("hidden");
-        el.previewFrame.src = "about:blank";
-      }
+      showPreviewWaiting(files.length ? "No index.html yet." : "Nothing to preview yet.");
       return;
     }
-    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
-    if (el.previewFrame) el.previewFrame.classList.remove("hidden");
-    if (!el.previewFrame.src || el.previewFrame.src === "about:blank") loadPreview();
+    if (files.length === 1 && files[0].path === "index.html") {
+      state.hasIndex = false;
+      showPreviewWaiting("Starter page only.");
+      confirmNotSeed(epoch, state.currentProjectId);
+      return;
+    }
+    revealPreview();
   }
 
   function copySyncCommands() {
