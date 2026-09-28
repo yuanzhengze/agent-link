@@ -20,12 +20,17 @@ import (
 // cookie-based live-reload script injected (no token in the URL); other files
 // are served as-is with a derived Content-Type.
 func (s *Server) handlePreviewV2(w http.ResponseWriter, r *http.Request) {
+	// Isolated preview never serves member HTML on the application origin,
+	// even to a logged-in member. The GUI loads the grant URL on the preview
+	// origin instead, so a stored script cannot read al_csrf.
+	if s.previewIsolated() {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
 	teamID := r.PathValue("team_id")
 	projectID := r.PathValue("project_id")
 	rel := r.PathValue("path")
-	if rel == "" || strings.HasSuffix(rel, "/") {
-		rel += "index.html"
-	}
 
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
@@ -57,6 +62,23 @@ func (s *Server) handlePreviewV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	script, err := liveReloadScriptV2(teamID, projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	s.writePreviewFile(w, teamID, projectID, rel, script, false)
+}
+
+// writePreviewFile serves one project file. rel is the path inside the project;
+// an empty or directory-style rel maps to index.html. HTML responses get
+// liveReload injected. isolated adds the headers that keep a preview grant from
+// leaking off the preview origin.
+func (s *Server) writePreviewFile(w http.ResponseWriter, teamID, projectID, rel, liveReload string, isolated bool) {
+	if rel == "" || strings.HasSuffix(rel, "/") {
+		rel += "index.html"
+	}
+
 	// Reuse the hardened traversal/absolute-path/.git checks; any rejection
 	// maps to 404 so a reader learns nothing about why a path is unreachable.
 	fullPath, err := safeApplyPath(s.projectDirV2(teamID, projectID), rel)
@@ -79,23 +101,23 @@ func (s *Server) handlePreviewV2(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// nosniff prevents the browser from MIME-sniffing a non-HTML asset into
-	// executable HTML/JS. Note this does NOT neutralize stored XSS in genuine
-	// .html prototypes: preview is served same-origin as the app (so a member's
-	// injected <script> can read the readable al_csrf cookie and act as a
-	// viewing member). Origin isolation is the real fix; see the team-auth
-	// design's preview section. Threat is insider-only (a member attacking
-	// teammates), matching v1's accepted model.
+	// executable HTML/JS. Same-origin preview still cannot stop a genuine
+	// .html prototype from reading al_csrf; that case is closed by serving
+	// the file from previewOrigin with a read-only grant (see preview_grant.go).
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if isolated {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "private, no-store")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors "+s.publicOrigin)
+	}
 
 	ext := filepath.Ext(fullPath)
 	if strings.EqualFold(ext, ".html") || strings.EqualFold(ext, ".htm") {
-		script, err := liveReloadScriptV2(teamID, projectID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(injectBeforeBodyClose(data, script))
+		if liveReload != "" {
+			data = injectBeforeBodyClose(data, liveReload)
+		}
+		w.Write(data)
 		return
 	}
 

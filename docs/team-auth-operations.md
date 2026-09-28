@@ -20,6 +20,30 @@ The server reads these environment variables (see `/etc/agent-link/server.env`):
 | `REDIS_ADDR` | yes | Redis address, e.g. `localhost:6379`. |
 | `DATA_DIR` | yes | Directory holding per-team project Git repositories. Back this up. |
 | `LISTEN_ADDR` | no | Listen address, default `:8080`. |
+| `PREVIEW_PUBLIC_URL` | no | Origin that serves member-authored preview HTML. Must be a different origin from `PUBLIC_URL` and must obey the same HTTPS rules. When `PUBLIC_URL` is `localhost` and this is unset, the server uses `http://127.0.0.1` on the same port. Set to `off` to keep same-origin preview. |
+
+### Preview origin
+
+Prototype HTML is untrusted, even when the author is a teammate. If it is served
+on the application origin, a `<script>` in the prototype can read the readable
+`al_csrf` cookie and call the API as the person viewing the preview.
+
+When `PREVIEW_PUBLIC_URL` is a different origin (the localhost default is
+`http://127.0.0.1:<port>`):
+
+- The GUI mints a 30-minute read-only grant and loads the iframe from that origin.
+- The iframe is sandboxed without `allow-same-origin`, so its scripts cannot
+  touch the parent page.
+- The application host returns 404 for `/preview/...`, including grant URLs.
+- Removing the member, or waiting out the grant TTL, stops the preview.
+- Open the GUI at `PUBLIC_URL`. Logging in on the preview host will not match
+  the configured origin.
+
+Production needs a real second hostname (for example `preview.example` next to
+`cowork.example`) on the same server, with TLS, and `PREVIEW_PUBLIC_URL` set to
+it. A same-site subdomain is enough: host-only cookies plus the existing
+`Origin` and CSRF checks block credentialed writes. `PREVIEW_PUBLIC_URL=off`
+keeps the old same-origin behavior.
 
 ### HTTPS requirement
 

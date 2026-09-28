@@ -35,6 +35,14 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`id="input-login-username"`,
 		`id="input-register-password"`,
 		`id="form-change-password"`,
+		`id="preview-frame"`,
+		`sandbox="allow-scripts allow-forms allow-popups allow-modals"`,
+		`referrerpolicy="no-referrer"`,
+		`id="form-new-project"`,
+		`id="preview-empty"`,
+		`id="invite-pair"`,
+		`At least 10 characters.`,
+		`Joining needs both the team ID and the invite code.`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
@@ -61,6 +69,8 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 		"/agents",
 		"/ws?project=",
 		"/preview/",
+		"preview-grant",
+		"isolated",
 	} {
 		if !strings.Contains(dash, marker) {
 			t.Errorf("dashboard.js missing team-scoped route %q", marker)
@@ -73,6 +83,27 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 	} {
 		if strings.Contains(dash, forbidden) {
 			t.Errorf("dashboard.js must not use legacy auth %q", forbidden)
+		}
+	}
+	if strings.Contains(dash, "window.prompt") {
+		t.Error("dashboard.js must create projects with the form modal, not window.prompt")
+	}
+	if !strings.Contains(dash, "agentlink sync ") {
+		t.Error("dashboard.js missing sync command guidance")
+	}
+	if !strings.Contains(dash, seedIndexHTML) {
+		t.Error("dashboard.js starter page no longer matches seedIndexHTML")
+	}
+	if !strings.Contains(dash, "/snapshot") {
+		t.Error("dashboard.js must read the starter page before previewing it")
+	}
+	teamsJS := getGUIAsset(t, "/teams.js")
+	for _, marker := range []string{
+		"Team ID: ",
+		"Invite code: ",
+	} {
+		if !strings.Contains(teamsJS, marker) {
+			t.Errorf("teams.js missing invite pair marker %q", marker)
 		}
 	}
 }

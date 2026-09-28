@@ -47,6 +47,7 @@ The server requires Redis and is configured via environment variables:
 | `REDIS_ADDR` | `localhost:6379` | Redis server address |
 | `DATA_DIR` | `./data` | On-disk project Git repositories |
 | `PUBLIC_URL` | `http://localhost:8080` | Public origin; sets cookie scope |
+| `PREVIEW_PUBLIC_URL` | `http://127.0.0.1:<port>` when `PUBLIC_URL` is localhost; otherwise unset | Origin that serves prototype HTML. Must differ from `PUBLIC_URL`. `off` keeps same-origin preview |
 | `COOKIE_SECURE` | `false` | Send session cookies only over HTTPS |
 
 > **HTTPS is required in production.** The server refuses to start with a
@@ -95,6 +96,11 @@ agentlink sync <project_id> ./prototype
   `Authorization: Device <session>`; the secret never appears in URLs or logs.
 - **Web GUI** — browsers authenticate with an HttpOnly session cookie plus a CSRF
   token. Preview is restricted to authenticated members of the owning team.
+  On localhost the server serves preview HTML from `127.0.0.1` (a different
+  origin) with a short-lived read-only grant, so a prototype script cannot read
+  the session or CSRF cookies. Open the GUI at `PUBLIC_URL`, not at the preview
+  host. Set `PREVIEW_PUBLIC_URL` to a second hostname in production, or `off` to
+  keep the previous same-origin behavior.
 
 ## CLI Usage
 

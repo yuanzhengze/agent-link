@@ -7,10 +7,26 @@
 
   var api = window.CoworkAPI;
 
+  // Must match pkg/api seedIndexHTML. A brand-new project commits this file,
+  // which is not a synced prototype.
+  var SEED_INDEX_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>New Project</title>
+</head>
+<body>
+  <h1>New Project</h1>
+</body>
+</html>
+`;
+
   var state = {
     team: null,
     currentProjectId: null,
     currentProjectName: "",
+    hasIndex: false,
+    treeEpoch: 0,
     ws: null,
     wsReconnectTimer: null,
     wsReconnectDelay: 1000,
@@ -33,8 +49,21 @@
     btnRefreshTree: document.getElementById("btn-refresh-tree"),
     fileTree: document.getElementById("file-tree"),
     fileTreeEmpty: document.getElementById("file-tree-empty"),
+    fileSyncCommand: document.getElementById("file-sync-command"),
 
     previewFrame: document.getElementById("preview-frame"),
+    previewError: document.getElementById("preview-error"),
+    previewEmpty: document.getElementById("preview-empty"),
+    previewEmptyLead: document.getElementById("preview-empty-lead"),
+    previewSyncCommand: document.getElementById("preview-sync-command"),
+    btnCopySync: document.getElementById("btn-copy-sync"),
+
+    projectModal: document.getElementById("project-modal"),
+    formNewProject: document.getElementById("form-new-project"),
+    inputProjectName: document.getElementById("input-project-name"),
+    projectModalError: document.getElementById("project-modal-error"),
+    btnProjectClose: document.getElementById("btn-project-close"),
+    btnProjectCancel: document.getElementById("btn-project-cancel"),
 
     onlinePanel: document.getElementById("online-panel"),
     onlinePanelEmpty: document.getElementById("online-panel-empty"),
@@ -109,16 +138,53 @@
     });
   }
 
-  function newProject() {
+  function showProjectModalError(msg) {
+    if (!el.projectModalError) return;
+    el.projectModalError.textContent = msg;
+    el.projectModalError.classList.remove("hidden");
+  }
+
+  function clearProjectModalError() {
+    if (!el.projectModalError) return;
+    el.projectModalError.textContent = "";
+    el.projectModalError.classList.add("hidden");
+  }
+
+  function openProjectModal() {
+    if (!state.team || !el.projectModal) return;
+    clearProjectModalError();
+    if (el.formNewProject) el.formNewProject.reset();
+    el.projectModal.classList.remove("hidden");
+    if (el.inputProjectName) el.inputProjectName.focus();
+  }
+
+  function closeProjectModal() {
+    if (!el.projectModal) return;
+    el.projectModal.classList.add("hidden");
+    clearProjectModalError();
+  }
+
+  function submitNewProject(ev) {
+    ev.preventDefault();
     if (!state.team) return;
-    var name = window.prompt("New project name");
-    if (!name) return;
+    var name = (el.inputProjectName && el.inputProjectName.value || "").trim();
+    if (!name) {
+      showProjectModalError("Enter a project name.");
+      return;
+    }
+    clearProjectModalError();
     api.request(teamURL("/projects"), {
       method: "POST",
-      body: JSON.stringify({ name: name.trim() })
+      body: JSON.stringify({ name: name })
     }).then(function (res) {
-      if (res.ok) loadProjects();
-      else showGlobalError((res.body && res.body.error) || ("Create failed (" + res.status + ")"));
+      if (!res.ok) {
+        showProjectModalError((res.body && res.body.error) || ("Create failed (" + res.status + ")"));
+        return;
+      }
+      closeProjectModal();
+      var project = res.body || {};
+      if (project.id) openProject(project.id, project.name || name);
+      else loadProjects();
     });
   }
 
@@ -131,10 +197,8 @@
     el.btnBack.classList.remove("hidden");
     el.viewProjects.classList.add("hidden");
     el.viewProject.classList.remove("hidden");
-
-    el.previewFrame.src = "/preview/" +
-      encodeURIComponent(state.team.id) + "/" +
-      encodeURIComponent(id) + "/";
+    state.hasIndex = false;
+    showPreviewWaiting();
 
     loadTree();
     loadAgents();
@@ -148,7 +212,145 @@
     el.currentProjectName.textContent = "";
     el.viewProject.classList.add("hidden");
     el.viewProjects.classList.remove("hidden");
-    el.previewFrame.src = "about:blank";
+    state.hasIndex = false;
+    if (el.previewFrame) {
+      el.previewFrame.src = "about:blank";
+      el.previewFrame.classList.add("hidden");
+    }
+    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
+    clearPreviewError();
+  }
+
+  function syncCommands() {
+    var teamID = state.team ? state.team.id : "";
+    var projectID = state.currentProjectId || "";
+    return "agentlink team use " + teamID + "\nagentlink sync " + projectID + " ./prototype";
+  }
+
+  function showPreviewWaiting(lead) {
+    if (el.previewEmptyLead) {
+      el.previewEmptyLead.textContent = lead || "Nothing to preview yet.";
+    }
+    if (el.fileSyncCommand) el.fileSyncCommand.textContent = syncCommands();
+    if (el.previewSyncCommand) el.previewSyncCommand.textContent = syncCommands();
+    if (el.previewEmpty) el.previewEmpty.classList.remove("hidden");
+    if (el.previewFrame) {
+      el.previewFrame.classList.add("hidden");
+      el.previewFrame.src = "about:blank";
+    }
+  }
+
+  function revealPreview() {
+    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
+    if (el.previewFrame) el.previewFrame.classList.remove("hidden");
+    if (!el.previewFrame.src || el.previewFrame.src === "about:blank") loadPreview();
+  }
+
+  function isSeedIndex(content) {
+    return content === SEED_INDEX_HTML;
+  }
+
+  function confirmNotSeed(epoch, projectId) {
+    api.request(teamURL("/projects/" + encodeURIComponent(projectId) + "/snapshot")).then(function (res) {
+      if (state.treeEpoch !== epoch || state.currentProjectId !== projectId) return;
+      var files = (res.ok && res.body && res.body.files) || [];
+      var index = null;
+      files.forEach(function (f) {
+        if (f.path === "index.html") index = f;
+      });
+      if (res.ok && files.length === 1 && index && isSeedIndex(index.content)) {
+        state.hasIndex = false;
+        showPreviewWaiting("Starter page only.");
+        return;
+      }
+      state.hasIndex = true;
+      revealPreview();
+    });
+  }
+
+  function updateEmptyState(files) {
+    var epoch = ++state.treeEpoch;
+    var hasIndex = files.some(function (f) {
+      return f.path === "index.html" || f.path === "index.htm";
+    });
+    state.hasIndex = hasIndex;
+    var commands = syncCommands();
+    if (el.fileSyncCommand) el.fileSyncCommand.textContent = commands;
+    if (el.previewSyncCommand) el.previewSyncCommand.textContent = commands;
+    if (el.fileTreeEmpty) el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
+    if (!hasIndex) {
+      showPreviewWaiting(files.length ? "No index.html yet." : "Nothing to preview yet.");
+      return;
+    }
+    if (files.length === 1 && files[0].path === "index.html") {
+      state.hasIndex = false;
+      showPreviewWaiting("Starter page only.");
+      confirmNotSeed(epoch, state.currentProjectId);
+      return;
+    }
+    revealPreview();
+  }
+
+  function copySyncCommands() {
+    var text = syncCommands();
+    var done = function () {
+      if (!el.btnCopySync) return;
+      el.btnCopySync.textContent = "Copied";
+      setTimeout(function () { el.btnCopySync.textContent = "Copy commands"; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () {
+        if (el.previewSyncCommand) {
+          var range = document.createRange();
+          range.selectNodeContents(el.previewSyncCommand);
+          var selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      });
+      return;
+    }
+    done();
+  }
+
+  function showPreviewError(msg) {
+    if (!el.previewError) return;
+    el.previewError.textContent = msg;
+    el.previewError.classList.remove("hidden");
+  }
+
+  function clearPreviewError() {
+    if (!el.previewError) return;
+    el.previewError.textContent = "";
+    el.previewError.classList.add("hidden");
+  }
+
+  // Ask the server for the preview URL. When isolation is on, that URL is on
+  // a different origin and carries a read-only grant, so prototype scripts
+  // cannot use the viewer's session. The same-origin fallback is
+  // /preview/<team>/<project>/ and is only returned when isolation is off.
+  function loadPreview() {
+    if (!state.team || !state.currentProjectId || !el.previewFrame) return;
+    var projectId = state.currentProjectId;
+    api.request(teamURL("/projects/" + encodeURIComponent(projectId) + "/preview-grant"), {
+      method: "POST",
+      body: "{}"
+    }).then(function (res) {
+      if (state.currentProjectId !== projectId) return;
+      if (!res.ok || !res.body || !res.body.bootstrap_url) {
+        showPreviewError((res.body && res.body.error) || ("Preview failed (" + res.status + ")"));
+        el.previewFrame.src = "about:blank";
+        return;
+      }
+      clearPreviewError();
+      if (res.body.isolated) {
+        el.previewFrame.setAttribute("sandbox", "allow-scripts allow-forms allow-popups allow-modals");
+        el.previewFrame.setAttribute("referrerpolicy", "no-referrer");
+      } else {
+        el.previewFrame.removeAttribute("sandbox");
+      }
+      el.previewFrame.src = res.body.bootstrap_url;
+    });
   }
 
   // ---- file tree + locks -------------------------------------------------
@@ -159,6 +361,7 @@
       if (!res.ok) return;
       clearGlobalError();
       renderFileTree((res.body && res.body.files) || []);
+      updateEmptyState((res.body && res.body.files) || []);
     });
   }
 
@@ -169,7 +372,6 @@
 
   function renderFileTree(files) {
     el.fileTree.innerHTML = "";
-    el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
     files.slice().sort(function (a, b) {
       return a.path.localeCompare(b.path);
     }).forEach(function (f) {
@@ -362,15 +564,28 @@
   }
 
   function reloadPreview() {
-    if (el.previewFrame && el.previewFrame.src && el.previewFrame.src !== "about:blank") {
-      // Reassigning src forces the iframe to refetch the freshly-committed file.
-      el.previewFrame.src = el.previewFrame.src;
-    }
+    if (!state.hasIndex) return;
+    // Mint a fresh grant so a reload does not reuse an expired capability.
+    loadPreview();
   }
 
   // ---- wiring ------------------------------------------------------------
 
-  if (el.btnNewProject) el.btnNewProject.addEventListener("click", newProject);
+  if (el.btnNewProject) el.btnNewProject.addEventListener("click", openProjectModal);
+  if (el.formNewProject) el.formNewProject.addEventListener("submit", submitNewProject);
+  if (el.btnProjectClose) el.btnProjectClose.addEventListener("click", closeProjectModal);
+  if (el.btnProjectCancel) el.btnProjectCancel.addEventListener("click", closeProjectModal);
+  if (el.projectModal) {
+    el.projectModal.addEventListener("click", function (ev) {
+      if (ev.target === el.projectModal) closeProjectModal();
+    });
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && el.projectModal && !el.projectModal.classList.contains("hidden")) {
+      closeProjectModal();
+    }
+  });
+  if (el.btnCopySync) el.btnCopySync.addEventListener("click", copySyncCommands);
   if (el.btnRefreshProjects) el.btnRefreshProjects.addEventListener("click", loadProjects);
   if (el.btnBack) el.btnBack.addEventListener("click", function () { closeProject(); loadProjects(); });
   if (el.btnRefreshTree) el.btnRefreshTree.addEventListener("click", loadTree);

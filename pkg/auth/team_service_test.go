@@ -9,7 +9,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/team/agentlink/pkg/redis"
 )
@@ -58,7 +57,7 @@ func joinTestTeam(t *testing.T, svc *Service, user User, teamID, invite string) 
 }
 
 func TestInviteRawNotStoredInRedis(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	result := createTestTeam(t, svc, owner, "Alpha Squad")
@@ -69,7 +68,7 @@ func TestInviteRawNotStoredInRedis(t *testing.T) {
 }
 
 func TestRotateInviteJoinRaceOldCodeRejected(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -113,7 +112,7 @@ func TestRotateInviteJoinRaceOldCodeRejected(t *testing.T) {
 }
 
 func TestJoinTeamAlreadyMember(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -126,7 +125,7 @@ func TestJoinTeamAlreadyMember(t *testing.T) {
 }
 
 func TestSpoofedActorRoleCannotEscalate(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -147,7 +146,7 @@ func TestSpoofedActorRoleCannotEscalate(t *testing.T) {
 }
 
 func TestCreateTeamIDCollisionRetries(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	collisionID, err := NewTeamID()
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +189,7 @@ func TestCreateTeamIDCollisionRetries(t *testing.T) {
 }
 
 func TestCreateTeamIDCollisionExhaustedNoPartialIndex(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	collisionID, err := NewTeamID()
 	if err != nil {
 		t.Fatal(err)
@@ -238,7 +237,7 @@ func TestCreateTeamIDCollisionExhaustedNoPartialIndex(t *testing.T) {
 }
 
 func TestTransferOwnerOldOwnerBecomesAdmin(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	successor := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -266,7 +265,7 @@ func TestTransferOwnerOldOwnerBecomesAdmin(t *testing.T) {
 }
 
 func TestConcurrentTransferOwnerSingleOwner(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	alpha := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -334,7 +333,7 @@ func TestConcurrentTransferOwnerSingleOwner(t *testing.T) {
 }
 
 func TestMemberUserTeamsIndexJoinRemoveLeave(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -372,7 +371,7 @@ func TestMemberUserTeamsIndexJoinRemoveLeave(t *testing.T) {
 }
 
 func TestChangeRoleInvalidRole(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -388,7 +387,7 @@ func TestChangeRoleInvalidRole(t *testing.T) {
 }
 
 func TestOwnerCannotSelfRemoveOrDemote(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, _ := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	result := createTestTeam(t, svc, owner, "Owner Guard")
@@ -405,7 +404,7 @@ func TestOwnerCannotSelfRemoveOrDemote(t *testing.T) {
 }
 
 func TestMissingTargetMutationsReturnErrNotMemberWithoutChanges(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	target := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -451,7 +450,7 @@ func TestMissingTargetMutationsReturnErrNotMemberWithoutChanges(t *testing.T) {
 }
 
 func TestListMembersCleansNonOwnerOrphanAndContinues(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	orphan := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -482,7 +481,7 @@ func TestListMembersCleansNonOwnerOrphanAndContinues(t *testing.T) {
 }
 
 func TestListMembersMissingOwnerReturnsConsistencyErrorWithoutCleanup(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -501,7 +500,7 @@ func TestListMembersMissingOwnerReturnsConsistencyErrorWithoutCleanup(t *testing
 }
 
 func TestListMembersUserReadErrorDoesNotCleanup(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -522,7 +521,7 @@ func TestListMembersUserReadErrorDoesNotCleanup(t *testing.T) {
 }
 
 func TestJoinTeamRequiresExistingActiveUser(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	inactive := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -550,7 +549,7 @@ func TestJoinTeamRequiresExistingActiveUser(t *testing.T) {
 }
 
 func TestJoinTeamCorruptRedisTypeReturnsInternalError(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	joiner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -571,7 +570,7 @@ func TestJoinTeamCorruptRedisTypeReturnsInternalError(t *testing.T) {
 }
 
 func TestCreateTeamRetriesOrphanMembersHashWithoutMutation(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	orphanID, err := NewTeamID()
 	if err != nil {
 		t.Fatal(err)
@@ -635,7 +634,7 @@ func TestCreateTeamRetriesOrphanMembersHashWithoutMutation(t *testing.T) {
 }
 
 func TestCreateTeamFiveOrphanMembersCollisionsLeaveNoNewIndex(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	orphanIDs := make([]string, createTeamMaxAttempts)
 	orphanSnapshots := make(map[string]map[string]string, createTeamMaxAttempts)
 	for i := range orphanIDs {
@@ -694,7 +693,7 @@ func TestCreateTeamFiveOrphanMembersCollisionsLeaveNoNewIndex(t *testing.T) {
 }
 
 func TestRemoveOrphanMemberPreservesRecoveredUser(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -723,7 +722,7 @@ func TestRemoveOrphanMemberPreservesRecoveredUser(t *testing.T) {
 }
 
 func TestListMembersRequiresTeamHashBeforeMembership(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -743,7 +742,7 @@ func TestListMembersRequiresTeamHashBeforeMembership(t *testing.T) {
 }
 
 func TestStoreJoinTeamRechecksUserActiveBeforeWriting(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	result := createTestTeam(t, svc, owner, "Join Recheck")
@@ -776,7 +775,7 @@ func TestStoreJoinTeamRechecksUserActiveBeforeWriting(t *testing.T) {
 }
 
 func TestListMembersCleansOrphanAdmin(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, _, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	admin := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
@@ -801,7 +800,7 @@ func TestListMembersCleansOrphanAdmin(t *testing.T) {
 }
 
 func TestRemoveOrphanMemberFailsClosedWhenOwnerIDPointsToTarget(t *testing.T) {
-	clock := FixedClock{T: time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)}
+	clock := redisNowClock()
 	svc, store, rdb := newTeamTestService(t, clock)
 	owner := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")
 	member := registerServiceUser(t, svc, uniqueTestUsername(t), "correct horse battery staple")

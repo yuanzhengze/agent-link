@@ -22,7 +22,10 @@ var testDataDir string
 var testSrv *Server
 
 func TestMain(m *testing.M) {
-	rdb, err := redis.NewClient("localhost:6379")
+	// DB 4 is private to this fixture. cleanupTestData deletes every
+	// agentlink:v2 key, and DB 0 is shared with pkg/auth and
+	// cmd/agentlink-admin. Wiping DB 0 races those packages under `go test ./...`.
+	rdb, err := redis.NewClientDB("localhost:6379", 4)
 	if err != nil {
 		fmt.Println("redis not available, skipping api tests")
 		os.Exit(0)
