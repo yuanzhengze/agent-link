@@ -11,6 +11,7 @@
     team: null,
     currentProjectId: null,
     currentProjectName: "",
+    hasIndex: false,
     ws: null,
     wsReconnectTimer: null,
     wsReconnectDelay: 1000,
@@ -33,9 +34,21 @@
     btnRefreshTree: document.getElementById("btn-refresh-tree"),
     fileTree: document.getElementById("file-tree"),
     fileTreeEmpty: document.getElementById("file-tree-empty"),
+    fileSyncCommand: document.getElementById("file-sync-command"),
 
     previewFrame: document.getElementById("preview-frame"),
     previewError: document.getElementById("preview-error"),
+    previewEmpty: document.getElementById("preview-empty"),
+    previewEmptyLead: document.getElementById("preview-empty-lead"),
+    previewSyncCommand: document.getElementById("preview-sync-command"),
+    btnCopySync: document.getElementById("btn-copy-sync"),
+
+    projectModal: document.getElementById("project-modal"),
+    formNewProject: document.getElementById("form-new-project"),
+    inputProjectName: document.getElementById("input-project-name"),
+    projectModalError: document.getElementById("project-modal-error"),
+    btnProjectClose: document.getElementById("btn-project-close"),
+    btnProjectCancel: document.getElementById("btn-project-cancel"),
 
     onlinePanel: document.getElementById("online-panel"),
     onlinePanelEmpty: document.getElementById("online-panel-empty"),
@@ -110,16 +123,53 @@
     });
   }
 
-  function newProject() {
+  function showProjectModalError(msg) {
+    if (!el.projectModalError) return;
+    el.projectModalError.textContent = msg;
+    el.projectModalError.classList.remove("hidden");
+  }
+
+  function clearProjectModalError() {
+    if (!el.projectModalError) return;
+    el.projectModalError.textContent = "";
+    el.projectModalError.classList.add("hidden");
+  }
+
+  function openProjectModal() {
+    if (!state.team || !el.projectModal) return;
+    clearProjectModalError();
+    if (el.formNewProject) el.formNewProject.reset();
+    el.projectModal.classList.remove("hidden");
+    if (el.inputProjectName) el.inputProjectName.focus();
+  }
+
+  function closeProjectModal() {
+    if (!el.projectModal) return;
+    el.projectModal.classList.add("hidden");
+    clearProjectModalError();
+  }
+
+  function submitNewProject(ev) {
+    ev.preventDefault();
     if (!state.team) return;
-    var name = window.prompt("New project name");
-    if (!name) return;
+    var name = (el.inputProjectName && el.inputProjectName.value || "").trim();
+    if (!name) {
+      showProjectModalError("Enter a project name.");
+      return;
+    }
+    clearProjectModalError();
     api.request(teamURL("/projects"), {
       method: "POST",
-      body: JSON.stringify({ name: name.trim() })
+      body: JSON.stringify({ name: name })
     }).then(function (res) {
-      if (res.ok) loadProjects();
-      else showGlobalError((res.body && res.body.error) || ("Create failed (" + res.status + ")"));
+      if (!res.ok) {
+        showProjectModalError((res.body && res.body.error) || ("Create failed (" + res.status + ")"));
+        return;
+      }
+      closeProjectModal();
+      var project = res.body || {};
+      if (project.id) openProject(project.id, project.name || name);
+      else loadProjects();
     });
   }
 
@@ -132,8 +182,8 @@
     el.btnBack.classList.remove("hidden");
     el.viewProjects.classList.add("hidden");
     el.viewProject.classList.remove("hidden");
-
-    loadPreview();
+    state.hasIndex = false;
+    showPreviewWaiting();
 
     loadTree();
     loadAgents();
@@ -147,8 +197,81 @@
     el.currentProjectName.textContent = "";
     el.viewProject.classList.add("hidden");
     el.viewProjects.classList.remove("hidden");
-    el.previewFrame.src = "about:blank";
+    state.hasIndex = false;
+    if (el.previewFrame) {
+      el.previewFrame.src = "about:blank";
+      el.previewFrame.classList.add("hidden");
+    }
+    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
     clearPreviewError();
+  }
+
+  function syncCommands() {
+    var teamID = state.team ? state.team.id : "";
+    var projectID = state.currentProjectId || "";
+    return "agentlink team use " + teamID + "\nagentlink sync " + projectID + " ./prototype";
+  }
+
+  function showPreviewWaiting() {
+    if (el.previewEmptyLead) {
+      el.previewEmptyLead.textContent = "Nothing to preview yet.";
+    }
+    if (el.fileSyncCommand) el.fileSyncCommand.textContent = syncCommands();
+    if (el.previewSyncCommand) el.previewSyncCommand.textContent = syncCommands();
+    if (el.previewEmpty) el.previewEmpty.classList.remove("hidden");
+    if (el.previewFrame) {
+      el.previewFrame.classList.add("hidden");
+      el.previewFrame.src = "about:blank";
+    }
+  }
+
+  function updateEmptyState(files) {
+    var hasIndex = files.some(function (f) {
+      return f.path === "index.html" || f.path === "index.htm";
+    });
+    state.hasIndex = hasIndex;
+    var commands = syncCommands();
+    if (el.fileSyncCommand) el.fileSyncCommand.textContent = commands;
+    if (el.previewSyncCommand) el.previewSyncCommand.textContent = commands;
+    if (el.fileTreeEmpty) el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
+    if (!hasIndex) {
+      if (el.previewEmptyLead) {
+        el.previewEmptyLead.textContent = files.length
+          ? "No index.html yet."
+          : "Nothing to preview yet.";
+      }
+      if (el.previewEmpty) el.previewEmpty.classList.remove("hidden");
+      if (el.previewFrame) {
+        el.previewFrame.classList.add("hidden");
+        el.previewFrame.src = "about:blank";
+      }
+      return;
+    }
+    if (el.previewEmpty) el.previewEmpty.classList.add("hidden");
+    if (el.previewFrame) el.previewFrame.classList.remove("hidden");
+    if (!el.previewFrame.src || el.previewFrame.src === "about:blank") loadPreview();
+  }
+
+  function copySyncCommands() {
+    var text = syncCommands();
+    var done = function () {
+      if (!el.btnCopySync) return;
+      el.btnCopySync.textContent = "Copied";
+      setTimeout(function () { el.btnCopySync.textContent = "Copy commands"; }, 1500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () {
+        if (el.previewSyncCommand) {
+          var range = document.createRange();
+          range.selectNodeContents(el.previewSyncCommand);
+          var selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      });
+      return;
+    }
+    done();
   }
 
   function showPreviewError(msg) {
@@ -199,6 +322,7 @@
       if (!res.ok) return;
       clearGlobalError();
       renderFileTree((res.body && res.body.files) || []);
+      updateEmptyState((res.body && res.body.files) || []);
     });
   }
 
@@ -209,7 +333,6 @@
 
   function renderFileTree(files) {
     el.fileTree.innerHTML = "";
-    el.fileTreeEmpty.classList.toggle("hidden", files.length > 0);
     files.slice().sort(function (a, b) {
       return a.path.localeCompare(b.path);
     }).forEach(function (f) {
@@ -402,13 +525,28 @@
   }
 
   function reloadPreview() {
+    if (!state.hasIndex) return;
     // Mint a fresh grant so a reload does not reuse an expired capability.
     loadPreview();
   }
 
   // ---- wiring ------------------------------------------------------------
 
-  if (el.btnNewProject) el.btnNewProject.addEventListener("click", newProject);
+  if (el.btnNewProject) el.btnNewProject.addEventListener("click", openProjectModal);
+  if (el.formNewProject) el.formNewProject.addEventListener("submit", submitNewProject);
+  if (el.btnProjectClose) el.btnProjectClose.addEventListener("click", closeProjectModal);
+  if (el.btnProjectCancel) el.btnProjectCancel.addEventListener("click", closeProjectModal);
+  if (el.projectModal) {
+    el.projectModal.addEventListener("click", function (ev) {
+      if (ev.target === el.projectModal) closeProjectModal();
+    });
+  }
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && el.projectModal && !el.projectModal.classList.contains("hidden")) {
+      closeProjectModal();
+    }
+  });
+  if (el.btnCopySync) el.btnCopySync.addEventListener("click", copySyncCommands);
   if (el.btnRefreshProjects) el.btnRefreshProjects.addEventListener("click", loadProjects);
   if (el.btnBack) el.btnBack.addEventListener("click", function () { closeProject(); loadProjects(); });
   if (el.btnRefreshTree) el.btnRefreshTree.addEventListener("click", loadTree);

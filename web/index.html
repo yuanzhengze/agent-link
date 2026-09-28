@@ -34,6 +34,7 @@
           <input id="input-register-password" type="password"
                  autocomplete="new-password" minlength="10" required>
         </label>
+        <p class="field-hint">At least 10 characters.</p>
         <label>Confirm password
           <input id="input-register-confirm" type="password"
                  autocomplete="new-password" minlength="10" required>
@@ -53,6 +54,7 @@
           <input id="input-new-password" type="password"
                  autocomplete="new-password" minlength="10" required>
         </label>
+        <p class="field-hint">At least 10 characters.</p>
         <button type="submit">Change password</button>
       </form>
       <p id="auth-error" class="auth-error hidden"></p>
@@ -69,7 +71,8 @@
       </form>
       <div class="onboarding-sep">or</div>
       <form id="form-join-team">
-        <input id="input-team-id" placeholder="tm_xxxxxxxx" required>
+        <p class="field-hint">Joining needs both the team ID and the invite code.</p>
+        <input id="input-team-id" placeholder="Team ID (tm_xxxxxxxx)" required>
         <input id="input-invite-code" type="password" placeholder="Invite code" required>
         <button type="submit">Join team</button>
       </form>
@@ -107,7 +110,7 @@
         </div>
       </div>
       <ul id="project-list" class="project-list"></ul>
-      <p id="project-list-empty" class="empty-hint hidden">No projects yet — create one to get started.</p>
+      <p id="project-list-empty" class="empty-hint hidden">No projects yet. Create one, then sync a static prototype from the CLI.</p>
     </main>
 
     <main id="view-project" class="view hidden">
@@ -118,7 +121,12 @@
             <button id="btn-refresh-tree" class="btn-secondary btn-small" type="button">Refresh</button>
           </div>
           <ul id="file-tree" class="file-tree"></ul>
-          <p id="file-tree-empty" class="empty-hint hidden">No files in this project.</p>
+          <div id="file-tree-empty" class="empty-hint hidden">
+            <p>No files yet.</p>
+            <p>On a machine logged into this team, sync a static prototype:</p>
+            <pre id="file-sync-command" class="sync-command"></pre>
+            <p>Then refresh. Right-click a file to lock it so two people do not overwrite each other.</p>
+          </div>
         </section>
 
         <section class="pane pane-preview">
@@ -126,7 +134,13 @@
             <h2>Preview</h2>
           </div>
           <p id="preview-error" class="preview-error hidden"></p>
-          <iframe id="preview-frame" class="preview-frame" title="Live preview"
+          <div id="preview-empty" class="preview-empty">
+            <p id="preview-empty-lead">Nothing to preview yet.</p>
+            <p>Preview shows <code>index.html</code> after you sync. Until then this pane stays empty on purpose.</p>
+            <pre id="preview-sync-command" class="sync-command"></pre>
+            <button id="btn-copy-sync" class="btn-secondary btn-small" type="button">Copy commands</button>
+          </div>
+          <iframe id="preview-frame" class="preview-frame hidden" title="Live preview"
                   sandbox="allow-scripts allow-forms allow-popups allow-modals"
                   referrerpolicy="no-referrer"></iframe>
         </section>
@@ -173,14 +187,32 @@
       <h2>Invite code</h2>
       <button id="btn-invite-close" class="link-btn" type="button">Close</button>
     </div>
-    <p class="modal-note">Share this once. It will not be shown again.</p>
-    <div class="invite-row">
-      <code id="invite-modal-team" class="invite-code"></code>
+    <p class="modal-note">Share this once. It will not be shown again. Joining needs both lines.</p>
+    <textarea id="invite-pair" class="invite-pair" readonly rows="2"></textarea>
+    <div class="modal-actions">
+      <button id="btn-copy-invite" class="btn-secondary btn-small" type="button">Copy team ID and code</button>
     </div>
-    <div class="invite-row">
-      <code id="invite-modal-code" class="invite-code"></code>
-      <button id="btn-copy-invite" class="btn-secondary btn-small" type="button">Copy</button>
+  </div>
+</div>
+
+<!-- New project --------------------------------------------------------- -->
+<div id="project-modal" class="modal hidden">
+  <div class="modal-card" role="dialog" aria-labelledby="project-modal-title">
+    <div class="modal-header">
+      <h2 id="project-modal-title">New project</h2>
+      <button id="btn-project-close" class="link-btn" type="button">Close</button>
     </div>
+    <p class="modal-note">Creates an empty project. Sync a static prototype into it to see a preview.</p>
+    <form id="form-new-project">
+      <label>Project name
+        <input id="input-project-name" autocomplete="off" required>
+      </label>
+      <p id="project-modal-error" class="auth-error hidden"></p>
+      <div class="modal-actions">
+        <button id="btn-project-cancel" class="btn-secondary" type="button">Cancel</button>
+        <button class="btn-primary" type="submit">Create project</button>
+      </div>
+    </form>
   </div>
 </div>
 

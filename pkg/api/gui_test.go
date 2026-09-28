@@ -38,6 +38,11 @@ func TestServeGUIContainsAuthViews(t *testing.T) {
 		`id="preview-frame"`,
 		`sandbox="allow-scripts allow-forms allow-popups allow-modals"`,
 		`referrerpolicy="no-referrer"`,
+		`id="form-new-project"`,
+		`id="preview-empty"`,
+		`id="invite-pair"`,
+		`At least 10 characters.`,
+		`Joining needs both the team ID and the invite code.`,
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("missing %s", marker)
@@ -78,6 +83,21 @@ func TestServeGUIUsesV2TeamRoutes(t *testing.T) {
 	} {
 		if strings.Contains(dash, forbidden) {
 			t.Errorf("dashboard.js must not use legacy auth %q", forbidden)
+		}
+	}
+	if strings.Contains(dash, "window.prompt") {
+		t.Error("dashboard.js must create projects with the form modal, not window.prompt")
+	}
+	if !strings.Contains(dash, "agentlink sync ") {
+		t.Error("dashboard.js missing sync command guidance")
+	}
+	teamsJS := getGUIAsset(t, "/teams.js")
+	for _, marker := range []string{
+		"Team ID: ",
+		"Invite code: ",
+	} {
+		if !strings.Contains(teamsJS, marker) {
+			t.Errorf("teams.js missing invite pair marker %q", marker)
 		}
 	}
 }

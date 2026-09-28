@@ -20,8 +20,7 @@
     onboardingError: document.getElementById("onboarding-error"),
 
     inviteModal: document.getElementById("invite-modal"),
-    inviteModalTeam: document.getElementById("invite-modal-team"),
-    inviteModalCode: document.getElementById("invite-modal-code"),
+    invitePair: document.getElementById("invite-pair"),
     btnCopyInvite: document.getElementById("btn-copy-invite"),
     btnInviteClose: document.getElementById("btn-invite-close"),
 
@@ -120,18 +119,42 @@
 
   // ---- invite modal ------------------------------------------------------
 
+  function invitePairText(teamID, code) {
+    return "Team ID: " + teamID + "\nInvite code: " + code;
+  }
+
   function showInviteModal(teamID, code) {
     if (!el.inviteModal) return;
-    el.inviteModalTeam.textContent = teamID;
-    el.inviteModalCode.textContent = code;
+    if (el.invitePair) el.invitePair.value = invitePairText(teamID, code);
+    if (el.btnCopyInvite) el.btnCopyInvite.textContent = "Copy team ID and code";
     el.inviteModal.classList.remove("hidden");
   }
 
   function hideInviteModal() {
     if (!el.inviteModal) return;
-    el.inviteModalCode.textContent = "";
-    el.inviteModalTeam.textContent = "";
+    if (el.invitePair) el.invitePair.value = "";
     el.inviteModal.classList.add("hidden");
+  }
+
+  function copyInvitePair() {
+    var text = el.invitePair ? el.invitePair.value : "";
+    if (!text) return;
+    var done = function () {
+      el.btnCopyInvite.textContent = "Copied";
+      setTimeout(function () { el.btnCopyInvite.textContent = "Copy team ID and code"; }, 1500);
+    };
+    var fallback = function () {
+      el.invitePair.focus();
+      el.invitePair.select();
+      try {
+        if (document.execCommand("copy")) done();
+      } catch (e) { /* leave the selection so the pair can be copied by hand */ }
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallback);
+      return;
+    }
+    fallback();
   }
 
   // ---- member administration --------------------------------------------
@@ -336,17 +359,7 @@
   if (el.btnLeaveTeam) el.btnLeaveTeam.addEventListener("click", leaveTeam);
 
   if (el.btnInviteClose) el.btnInviteClose.addEventListener("click", hideInviteModal);
-  if (el.btnCopyInvite) {
-    el.btnCopyInvite.addEventListener("click", function () {
-      var code = el.inviteModalCode.textContent;
-      if (navigator.clipboard && code) {
-        navigator.clipboard.writeText(code).then(function () {
-          el.btnCopyInvite.textContent = "Copied";
-          setTimeout(function () { el.btnCopyInvite.textContent = "Copy"; }, 1500);
-        });
-      }
-    });
-  }
+  if (el.btnCopyInvite) el.btnCopyInvite.addEventListener("click", copyInvitePair);
 
   window.CoworkTeams = {
     load: load,
