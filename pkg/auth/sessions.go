@@ -1,0 +1,436 @@
+package auth
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	goredis "github.com/redis/go-redis/v9"
+)
+
+const (
+	WebSessionIdleTTL        = 12 * time.Hour
+	WebSessionAbsoluteTTL    = 7 * 24 * time.Hour
+	DeviceSessionIdleTTL     = 90 * 24 * time.Hour
+	sessionUserKeyPrefix     = "agentlink:v2:user:"
+	webSessionIndexSuffix    = ":web_sessions"
+	deviceSessionIndexSuffix = ":device_sessions"
+)
+
+type WebSession struct {
+	UserID            string
+	CSRFHash          string
+	PasswordVersion   int64
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	AbsoluteExpiresAt time.Time
+}
+
+type DeviceSession struct {
+	UserID          string
+	DeviceID        string
+	DeviceName      string // actor-only; loaded from persistent device record
+	PasswordVersion int64
+	CreatedAt       time.Time
+	LastSeenAt      time.Time
+}
+
+var createWebSessionScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
+
+local absolute_ms = tonumber(ARGV[7])
+if not absolute_ms or absolute_ms <= redis_now_ms then return 0 end
+local expires_ms = redis_now_ms + tonumber(ARGV[8])
+if absolute_ms < expires_ms then expires_ms = absolute_ms end
+
+redis.call('HSET', KEYS[1],
+  'user_id', ARGV[1], 'csrf_hash', ARGV[2], 'password_version', ARGV[3],
+  'created_at', ARGV[4], 'last_seen_at', ARGV[5],
+  'absolute_expires_at', ARGV[6], 'absolute_expires_at_unix_ms', ARGV[7])
+redis.call('PEXPIREAT', KEYS[1], expires_ms)
+redis.call('ZADD', KEYS[2], expires_ms, ARGV[9])
+return 1
+`)
+
+var createDeviceSessionScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
+
+redis.call('HSET', KEYS[1],
+  'user_id', ARGV[1], 'device_id', ARGV[2], 'password_version', ARGV[3],
+  'created_at', ARGV[4], 'last_seen_at', ARGV[5])
+redis.call('PEXPIRE', KEYS[1], ARGV[6])
+redis.call('ZADD', KEYS[2], redis_now_ms + tonumber(ARGV[6]), ARGV[7])
+return 1
+`)
+
+var resolveWebSessionScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+
+local user_id = redis.call('HGET', KEYS[1], 'user_id')
+if not user_id then return {0} end
+
+local index_key = ARGV[3] .. user_id .. ARGV[4]
+redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
+
+local values = redis.call('HMGET', KEYS[1],
+  'csrf_hash', 'password_version', 'created_at', 'absolute_expires_at',
+  'absolute_expires_at_unix_ms')
+local absolute_ms = tonumber(values[5])
+if not absolute_ms or redis_now_ms >= absolute_ms then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', index_key, ARGV[5])
+  return {0}
+end
+
+local current_version = redis.call('HGET', ARGV[3] .. user_id, 'password_version')
+if not current_version or current_version ~= values[2] then
+  redis.call('DEL', KEYS[1])
+  redis.call('ZREM', index_key, ARGV[5])
+  return {0}
+end
+
+local expires_ms = redis_now_ms + tonumber(ARGV[2])
+if absolute_ms < expires_ms then expires_ms = absolute_ms end
+
+redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
+redis.call('PEXPIREAT', KEYS[1], expires_ms)
+redis.call('ZADD', index_key, expires_ms, ARGV[5])
+return {1, user_id, values[1], values[2], values[3], ARGV[1], values[4]}
+`)
+
+var resolveDeviceSessionScript = goredis.NewScript(`
+local function key_type(key)
+  return redis.call('TYPE', key)['ok']
+end
+
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+
+local session_type = key_type(KEYS[1])
+if session_type == 'none' then return {0} end
+if session_type ~= 'hash' then
+  return redis.error_reply('device session has wrong type')
+end
+local values = redis.call('HMGET', KEYS[1],
+  'user_id', 'device_id', 'password_version', 'created_at')
+local user_id = values[1]
+local device_id = values[2]
+if not user_id then
+  redis.call('DEL', KEYS[1])
+  return {0}
+end
+
+local index_key = ARGV[3] .. user_id .. ARGV[4]
+local index_type = key_type(index_key)
+if index_type ~= 'none' and index_type ~= 'zset' then
+  return redis.error_reply('device session index has wrong type')
+end
+
+local function expire_session()
+  redis.call('DEL', KEYS[1])
+  if index_type == 'zset' then redis.call('ZREM', index_key, ARGV[5]) end
+  return {0}
+end
+
+if not device_id then return expire_session() end
+
+local binding_type = key_type(KEYS[2])
+if binding_type ~= 'hash' then return expire_session() end
+local binding = redis.call('HMGET', KEYS[2], 'user_id', 'device_id')
+if not binding[1] or binding[1] ~= user_id or
+   not binding[2] or binding[2] ~= device_id then
+  return expire_session()
+end
+
+local device_key = ARGV[6] .. device_id
+local device_type = key_type(device_key)
+if device_type ~= 'hash' then return expire_session() end
+local device_values = redis.call('HMGET', device_key, 'user_id', 'session_hash')
+if not device_values[1] or device_values[1] ~= user_id or
+   not device_values[2] or device_values[2] ~= ARGV[5] then
+  return expire_session()
+end
+
+local user_key = ARGV[3] .. user_id
+if key_type(user_key) ~= 'hash' then return expire_session() end
+local current_version = redis.call('HGET', user_key, 'password_version')
+if not current_version or current_version ~= values[3] then
+  return expire_session()
+end
+
+local ttl_ms = tonumber(ARGV[2])
+if not ttl_ms or ttl_ms <= 0 then
+  return redis.error_reply('invalid device session TTL')
+end
+
+if index_type == 'zset' then
+  redis.call('ZREMRANGEBYSCORE', index_key, '-inf', redis_now_ms)
+end
+redis.call('HSET', KEYS[1], 'last_seen_at', ARGV[1])
+redis.call('HSET', device_key, 'last_seen_at', ARGV[1])
+redis.call('PEXPIRE', KEYS[1], ttl_ms)
+redis.call('ZADD', index_key, redis_now_ms + ttl_ms, ARGV[5])
+return {1, user_id, device_id, values[3], values[4], ARGV[1]}
+`)
+
+var revokeSessionScript = goredis.NewScript(`
+local user_id = redis.call('HGET', KEYS[1], 'user_id')
+if not user_id then
+  redis.call('DEL', KEYS[1])
+  return 0
+end
+local index_key = ARGV[1] .. user_id .. ARGV[2]
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', index_key, ARGV[3])
+return 1
+`)
+
+var rotateWebCSRFScript = goredis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+redis.call('HSET', KEYS[1], 'csrf_hash', ARGV[1])
+return 1
+`)
+
+var revokeAllUserSessionsScript = goredis.NewScript(`
+local redis_time = redis.call('TIME')
+local redis_now_ms = (tonumber(redis_time[1]) * 1000) + math.floor(tonumber(redis_time[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', redis_now_ms)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', redis_now_ms)
+
+local web_sessions = redis.call('ZRANGE', KEYS[1], 0, -1)
+for _, hash in ipairs(web_sessions) do
+  redis.call('DEL', ARGV[1] .. hash)
+end
+local device_sessions = redis.call('ZRANGE', KEYS[2], 0, -1)
+for _, hash in ipairs(device_sessions) do
+  redis.call('DEL', ARGV[2] .. hash)
+end
+redis.call('DEL', KEYS[1], KEYS[2])
+return #web_sessions + #device_sessions
+`)
+
+func (s *Store) CreateWebSession(ctx context.Context, sessionHash string, ws WebSession) error {
+	if ws.AbsoluteExpiresAt.After(ws.CreatedAt.Add(WebSessionAbsoluteTTL)) {
+		return fmt.Errorf("web session absolute expiry exceeds %s", WebSessionAbsoluteTTL)
+	}
+
+	created, err := createWebSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{webSessionKey(sessionHash), userWebSessionsKey(ws.UserID)},
+		ws.UserID,
+		ws.CSRFHash,
+		ws.PasswordVersion,
+		formatRedisTime(ws.CreatedAt),
+		formatRedisTime(ws.LastSeenAt),
+		formatRedisTime(ws.AbsoluteExpiresAt),
+		ws.AbsoluteExpiresAt.UnixMilli(),
+		WebSessionIdleTTL.Milliseconds(),
+		sessionHash,
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("create web session: %w", err)
+	}
+	if created == 0 {
+		return ErrSessionExpired
+	}
+	return nil
+}
+
+func (s *Store) ResolveWebSession(ctx context.Context, sessionHash string, now time.Time) (WebSession, error) {
+	result, err := resolveWebSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{webSessionKey(sessionHash)},
+		formatRedisTime(now),
+		WebSessionIdleTTL.Milliseconds(),
+		sessionUserKeyPrefix,
+		webSessionIndexSuffix,
+		sessionHash,
+	).Slice()
+	if err != nil {
+		return WebSession{}, fmt.Errorf("resolve web session: %w", err)
+	}
+	if sessionReplyExpired(result) {
+		return WebSession{}, ErrSessionExpired
+	}
+	if len(result) != 7 {
+		return WebSession{}, fmt.Errorf("resolve web session: unexpected result length %d", len(result))
+	}
+
+	passwordVersion, err := parseRedisInt64(redisReplyString(result[3]), "password_version")
+	if err != nil {
+		return WebSession{}, err
+	}
+	createdAt, err := parseRedisTime(redisReplyString(result[4]), "created_at")
+	if err != nil {
+		return WebSession{}, err
+	}
+	lastSeenAt, err := parseRedisTime(redisReplyString(result[5]), "last_seen_at")
+	if err != nil {
+		return WebSession{}, err
+	}
+	absoluteExpiresAt, err := parseRedisTime(redisReplyString(result[6]), "absolute_expires_at")
+	if err != nil {
+		return WebSession{}, err
+	}
+	return WebSession{
+		UserID:            redisReplyString(result[1]),
+		CSRFHash:          redisReplyString(result[2]),
+		PasswordVersion:   passwordVersion,
+		CreatedAt:         createdAt,
+		LastSeenAt:        lastSeenAt,
+		AbsoluteExpiresAt: absoluteExpiresAt,
+	}, nil
+}
+
+func (s *Store) RevokeWebSession(ctx context.Context, sessionHash string) error {
+	if err := revokeSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{webSessionKey(sessionHash)},
+		sessionUserKeyPrefix,
+		webSessionIndexSuffix,
+		sessionHash,
+	).Err(); err != nil {
+		return fmt.Errorf("revoke web session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) CreateDeviceSession(ctx context.Context, sessionHash string, ds DeviceSession) error {
+	if err := createDeviceSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{deviceSessionKey(sessionHash), userDeviceSessionsKey(ds.UserID)},
+		ds.UserID,
+		ds.DeviceID,
+		ds.PasswordVersion,
+		formatRedisTime(ds.CreatedAt),
+		formatRedisTime(ds.LastSeenAt),
+		DeviceSessionIdleTTL.Milliseconds(),
+		sessionHash,
+	).Err(); err != nil {
+		return fmt.Errorf("create device session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ResolveDeviceSession(ctx context.Context, sessionHash string, now time.Time) (DeviceSession, error) {
+	result, err := resolveDeviceSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{
+			deviceSessionKey(sessionHash),
+			deviceCredentialKey(sessionHash),
+		},
+		formatRedisTime(now),
+		DeviceSessionIdleTTL.Milliseconds(),
+		sessionUserKeyPrefix,
+		deviceSessionIndexSuffix,
+		sessionHash,
+		"agentlink:v2:device:",
+	).Slice()
+	if err != nil {
+		return DeviceSession{}, fmt.Errorf("resolve device session: %w", err)
+	}
+	if sessionReplyExpired(result) {
+		return DeviceSession{}, ErrSessionExpired
+	}
+	if len(result) != 6 {
+		return DeviceSession{}, fmt.Errorf("resolve device session: unexpected result length %d", len(result))
+	}
+
+	passwordVersion, err := parseRedisInt64(redisReplyString(result[3]), "password_version")
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	createdAt, err := parseRedisTime(redisReplyString(result[4]), "created_at")
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	lastSeenAt, err := parseRedisTime(redisReplyString(result[5]), "last_seen_at")
+	if err != nil {
+		return DeviceSession{}, err
+	}
+	return DeviceSession{
+		UserID:          redisReplyString(result[1]),
+		DeviceID:        redisReplyString(result[2]),
+		PasswordVersion: passwordVersion,
+		CreatedAt:       createdAt,
+		LastSeenAt:      lastSeenAt,
+	}, nil
+}
+
+func (s *Store) RevokeDeviceSession(ctx context.Context, sessionHash string) error {
+	if err := revokeSessionScript.Run(
+		ctx,
+		s.rdb,
+		[]string{deviceSessionKey(sessionHash)},
+		sessionUserKeyPrefix,
+		deviceSessionIndexSuffix,
+		sessionHash,
+	).Err(); err != nil {
+		return fmt.Errorf("revoke device session: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RotateWebCSRF(ctx context.Context, sessionHash, newCSRFHash string) error {
+	updated, err := rotateWebCSRFScript.Run(
+		ctx,
+		s.rdb,
+		[]string{webSessionKey(sessionHash)},
+		newCSRFHash,
+	).Int64()
+	if err != nil {
+		return fmt.Errorf("rotate web csrf: %w", err)
+	}
+	if updated == 0 {
+		return ErrSessionExpired
+	}
+	return nil
+}
+
+func (s *Store) RevokeAllUserSessions(ctx context.Context, userID string) error {
+	if err := revokeAllUserSessionsScript.Run(
+		ctx,
+		s.rdb,
+		[]string{userWebSessionsKey(userID), userDeviceSessionsKey(userID)},
+		"agentlink:v2:web_session:",
+		"agentlink:v2:device_session:",
+	).Err(); err != nil {
+		return fmt.Errorf("revoke all user sessions: %w", err)
+	}
+	return nil
+}
+
+func sessionReplyExpired(result []interface{}) bool {
+	return len(result) == 1 && redisReplyInt64(result[0]) == 0
+}
+
+func redisReplyString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
+}
+
+func redisReplyInt64(value interface{}) int64 {
+	switch value := value.(type) {
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	default:
+		return -1
+	}
+}

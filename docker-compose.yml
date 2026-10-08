@@ -5,7 +5,15 @@ services:
       - "443:8080"
     environment:
       - REDIS_ADDR=redis:6379
-      - REGISTER_PASSWORD=${REGISTER_PASSWORD:-please-change-me}
+      # Public HTTPS origin (sets cookie scope). Terminate TLS at your proxy.
+      - PUBLIC_URL=${PUBLIC_URL:-https://cowork.example}
+      # Second origin for prototype HTML. Unset keeps same-origin preview.
+      # Example: https://preview.example
+      - PREVIEW_PUBLIC_URL=${PREVIEW_PUBLIC_URL:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-true}
+      - DATA_DIR=/data/projects
+    volumes:
+      - project_data:/data/projects
     depends_on:
       - redis
 
@@ -19,3 +27,4 @@ services:
 
 volumes:
   redis_data:
+  project_data:

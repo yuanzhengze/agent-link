@@ -1,37 +1,36 @@
 #!/bin/bash
-# Full reinstall: build, deploy, uninstall, re-init both machines
+# Full reinstall: build, deploy binaries, and re-init a local workspace.
+# Auth is account/team based: log in once (interactive password prompt), select
+# a team, then init the local-only workspace. There is no registration password.
 set -e
 
-SERVER=YOUR_SERVER_IP
-PASSWORD=YOUR_REGISTER_PASSWORD
+SERVER=https://YOUR_DOMAIN            # public HTTPS origin (server PUBLIC_URL)
+USERNAME=YOUR_USERNAME
 LOCAL_DEVICE=YOUR_USER-local
-REMOTE_DEVICE=YOUR_HOSTNAME
-REMOTE_BIN=/home/YOUR_USER/agent-link/deploy/agentlink
-REMOTE_PROJECT=/home/YOUR_USER/agentlink-server
 LOCAL_PROJECT=~/agentlink-test
 
 echo "=== 1. Build ==="
 cd "$(dirname "$0")"
 go build -o agentlink ./cmd/agentlink/
 
-echo "=== 2. Deploy binaries ==="
+echo "=== 2. Deploy binary ==="
 cp agentlink ~/.local/bin/agentlink.new
 mv ~/.local/bin/agentlink.new ~/.local/bin/agentlink
 
-scp agentlink "$SERVER:$REMOTE_BIN.new"
-ssh "$SERVER" "mv $REMOTE_BIN.new $REMOTE_BIN"
-ssh "$SERVER" "cp $REMOTE_BIN ~/.local/bin/agentlink.new && mv ~/.local/bin/agentlink.new ~/.local/bin/agentlink"
+echo "=== 3. Log in (prompts for password) ==="
+# Reuses the stored device session if already logged in; otherwise authenticates.
+agentlink login --server "$SERVER" --username "$USERNAME" --device "$LOCAL_DEVICE"
 
-echo "=== 3. Uninstall (local + remote) ==="
-agentlink uninstall --purge 2>/dev/null || true
+echo "=== 4. Select a team ==="
+# Pick an existing team, or create one: agentlink team create "Product"
+agentlink team list
+# agentlink team use <team_id>
+
+echo "=== 5. Init local workspace ==="
 rm -rf "$LOCAL_PROJECT"
-ssh "$SERVER" "$REMOTE_BIN uninstall --purge 2>/dev/null; rm -rf $REMOTE_PROJECT" || true
+agentlink init --force "$LOCAL_PROJECT" 2>&1 | head -5
 
-echo "=== 4. Init ==="
-agentlink init --server http://$SERVER:8080 --password "$PASSWORD" --device "$LOCAL_DEVICE" "$LOCAL_PROJECT" 2>&1 | head -5
-ssh "$SERVER" "$REMOTE_BIN init --server http://localhost:8080 --password '$PASSWORD' --device '$REMOTE_DEVICE' '$REMOTE_PROJECT'" 2>&1 | head -5
-
-echo "=== 5. Wait for heartbeat ==="
+echo "=== 6. Wait for heartbeat, then list team agents ==="
 sleep 10
 cd "$LOCAL_PROJECT/main"
 agentlink list --all

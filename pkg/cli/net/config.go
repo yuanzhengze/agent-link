@@ -17,17 +17,53 @@ type PollConfig struct {
 	Interval int
 }
 
+// AgentConfig is the v2 CLI configuration. It records the account identity
+// (user/device), the currently-selected team, the local runtime preferences,
+// and the per-session id map. CurrentTeam is intentionally optional so a freshly
+// registered user can still run `team create`/`team join` before selecting one.
 type AgentConfig struct {
-	Server   string
-	Device   string
-	BaseDir  string
-	Agent    string
-	Poll     PollConfig
-	Sessions map[string]string
+	Server      string
+	UserID      string
+	Username    string
+	DeviceID    string
+	Device      string
+	CurrentTeam string
+	BaseDir     string
+	Agent       string
+	Poll        PollConfig
+	Sessions    map[string]string
 }
 
+// AgentCredentials stores the single opaque Device Session used for
+// `Authorization: Device`. This is the only credential the v2 CLI recognizes; a
+// legacy api_key-only file is rejected by LoadCredentialsAt (missing
+// device_session), so a stale v1 credential can never authenticate.
 type AgentCredentials struct {
-	APIKey string `json:"api_key"`
+	DeviceSession string `json:"device_session"`
+}
+
+// parseAgentConfig builds an AgentConfig from raw config.toml content without
+// validating required fields, so both LoadConfig and SetCurrentTeam can share it.
+func parseAgentConfig(content string) *AgentConfig {
+	cfg := &AgentConfig{
+		Server:      ReadTOML(content, "server"),
+		UserID:      ReadTOML(content, "user_id"),
+		Username:    ReadTOML(content, "username"),
+		DeviceID:    ReadTOML(content, "device_id"),
+		Device:      ReadTOML(content, "device"),
+		CurrentTeam: ReadTOML(content, "current_team"),
+		BaseDir:     ReadTOML(content, "base_dir"),
+		Agent:       ReadTOML(content, "agent"),
+		Poll: PollConfig{
+			Enabled:  ReadTOMLBool(content, "poll.enabled", true),
+			Interval: ReadTOMLInt(content, "poll.interval", DefaultPollInterval),
+		},
+		Sessions: ReadTOMLSection(content, "sessions"),
+	}
+	if cfg.Agent == "" {
+		cfg.Agent = "claude"
+	}
+	return cfg
 }
 
 func LoadConfig() (*AgentConfig, error) {
@@ -37,28 +73,22 @@ func LoadConfig() (*AgentConfig, error) {
 		return nil, fmt.Errorf("config file not found at %s", path)
 	}
 
-	cfg := &AgentConfig{
-		Server:  ReadTOML(string(data), "server"),
-		Device:  ReadTOML(string(data), "device"),
-		BaseDir: ReadTOML(string(data), "base_dir"),
-		Agent:   ReadTOML(string(data), "agent"),
-		Poll: PollConfig{
-			Enabled:  ReadTOMLBool(string(data), "poll.enabled", true),
-			Interval: ReadTOMLInt(string(data), "poll.interval", 5),
-		},
-		Sessions: ReadTOMLSection(string(data), "sessions"),
-	}
-	if cfg.Server == "" || cfg.Device == "" {
-		return nil, fmt.Errorf("invalid config file at %s: missing server or device", path)
-	}
-	if cfg.Agent == "" {
-		cfg.Agent = "claude"
+	cfg := parseAgentConfig(string(data))
+	if cfg.Server == "" || cfg.DeviceID == "" || cfg.Device == "" {
+		return nil, fmt.Errorf("invalid config file at %s: missing server, device_id, or device", path)
 	}
 	return cfg, nil
 }
 
 func LoadCredentials() (*AgentCredentials, error) {
 	path := filepath.Join(os.Getenv("HOME"), ".agentlink", "credentials.json")
+	return LoadCredentialsAt(path)
+}
+
+// LoadCredentialsAt reads and validates a credentials file at an explicit path.
+// It requires a device_session and deliberately rejects a legacy api_key-only
+// file so a stale v1 credential can never authenticate the v2 client.
+func LoadCredentialsAt(path string) (*AgentCredentials, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("credentials file not found at %s", path)
@@ -68,10 +98,102 @@ func LoadCredentials() (*AgentCredentials, error) {
 	if err := json.Unmarshal(data, &creds); err != nil {
 		return nil, fmt.Errorf("invalid credentials file at %s: %w", path, err)
 	}
-	if creds.APIKey == "" {
-		return nil, fmt.Errorf("credentials file at %s is missing api_key", path)
+	if creds.DeviceSession == "" {
+		return nil, fmt.Errorf("credentials file at %s is missing device_session", path)
 	}
 	return &creds, nil
+}
+
+// WriteCredentials atomically writes the device session credential with mode
+// 0600, so a partial write can never leave a truncated or world-readable file.
+func WriteCredentials(path string, creds AgentCredentials) error {
+	data, err := json.MarshalIndent(AgentCredentials{DeviceSession: creds.DeviceSession}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("cannot encode credentials: %w", err)
+	}
+	return writeFileAtomic(path, append(data, '\n'), 0o600)
+}
+
+// WriteAccountConfig atomically writes the full v2 config.toml (account, team,
+// runtime, and sessions) with mode 0600.
+func WriteAccountConfig(path string, cfg AgentConfig) error {
+	return writeFileAtomic(path, []byte(buildAccountConfig(cfg)), 0o600)
+}
+
+// SetCurrentTeam rewrites only current_team while preserving every other
+// account/runtime field and the sessions map.
+func SetCurrentTeam(path, teamID string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read config: %w", err)
+	}
+	cfg := parseAgentConfig(string(data))
+	cfg.CurrentTeam = teamID
+	return WriteAccountConfig(path, *cfg)
+}
+
+// buildAccountConfig renders a v2 config.toml. Empty account/team fields are
+// still written (as empty strings) so the file shape is stable and predictable.
+func buildAccountConfig(cfg AgentConfig) string {
+	interval := cfg.Poll.Interval
+	if interval <= 0 {
+		interval = DefaultPollInterval
+	}
+	pollVal := "true"
+	if !cfg.Poll.Enabled {
+		pollVal = "false"
+	}
+	agent := cfg.Agent
+	if agent == "" {
+		agent = "claude"
+	}
+	content := fmt.Sprintf(`server = %q
+user_id = %q
+username = %q
+device_id = %q
+device = %q
+current_team = %q
+base_dir = %q
+agent = %q
+
+[poll]
+enabled = %s
+interval = %d
+`, cfg.Server, cfg.UserID, cfg.Username, cfg.DeviceID, cfg.Device,
+		cfg.CurrentTeam, cfg.BaseDir, agent, pollVal, interval)
+
+	if len(cfg.Sessions) > 0 {
+		content += "\n" + BuildSessionsSection(cfg.Sessions)
+	}
+	return content
+}
+
+// writeFileAtomic writes to a temp file in the same directory then renames it
+// into place, so readers never observe a partially-written config/credential.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("cannot create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot chmod temp file: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("cannot write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("cannot close temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("cannot rename temp file: %w", err)
+	}
+	return nil
 }
 
 func FindCurrentSession() (string, error) {

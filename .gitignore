@@ -1,6 +1,7 @@
 .gopath/
 /vendor/
 /agentlink
+/agentlink-admin
 /server
 /tmp/
 *-linux
@@ -10,3 +11,4 @@ deploy/agentlink
 deploy/server.log
 .env
 *.local
+/.worktrees/

@@ -20,55 +20,55 @@
 
 ### 1. API 层测试（curl）
 
-不依赖 CLI 配置，直接测试服务端 API：
+不依赖 CLI 配置，直接测试 v2 服务端 API（账号 + 团队 + 设备会话）。认证使用
+`Authorization: Device <credential>`，业务路径均以 `/api/teams/{team_id}/` 为前缀。
+`api_test.sh` 覆盖以下冒烟场景：
 
 | 场景 | 方法 | 端点 | 验证 |
 |------|------|------|------|
 | 健康检查 | GET | /health | 200 + redis connected |
-| 注册 | POST | /agents/register | 200 + api_key |
-| 重复注册（同名+同密码） | POST | /agents/register | 200（复用） |
-| 重复注册（错误密码） | POST | /agents/register | 401 |
-| 发消息 | POST | /messages/send | 200 + message id |
-| 拉消息 | GET | /inbox/pull | 200 + items |
-| 空收件箱 | GET | /inbox/pull | 200 + empty items |
-| 发任务 | POST | /tasks/send | 200 + task_id |
-| 任务忙检测 | POST | /tasks/send | 409 + recipient_status |
-| 完成任务 | POST | /tasks/result | 200 |
-| 取消任务 | POST | /tasks/cancel | 200 |
-| 任务状态 | GET | /tasks/status | 200 + status |
-| 活跃任务列表 | GET | /tasks/list | 200 + tasks |
-| 心跳 | POST | /agents/heartbeat | 200 |
-| 设备列表 | GET | /agents/list | 200 + devices |
-| 消息状态查询 | GET | /messages/status | 200 + pending/delivered |
-| 消息不存在 | GET | /messages/status | 404 |
-| 删除设备 | DELETE | /agents/device | 200 |
+| 注册账号 | POST | /api/auth/register | 2xx |
+| 设备登录 | POST | /api/auth/device-login | 2xx + device_credential |
+| 未认证请求 | GET | /api/teams | 401 |
+| 错误凭据 | GET | /api/teams | 401 |
+| 创建团队 | POST | /api/teams | 2xx + team.id + invite_code |
+| 创建项目 | POST | /api/teams/{id}/projects | 2xx + id |
+| 获取文件锁 | POST | /api/teams/{id}/locks/acquire | 2xx |
+| 应用文件 | POST | /api/teams/{id}/projects/{pid}/apply | 2xx + head_commit |
+| 读取快照 | GET | /api/teams/{id}/projects/{pid}/snapshot | 2xx + 内容一致 |
+| 团队成员 | GET | /api/teams/{id}/members | 2xx + ≥1 成员 |
+| 设备登出 | POST | /api/auth/device-logout | 2xx |
+| 登出后失效 | GET | /api/teams | 401 |
 
-### 2. CLI 层测试（双机）
+### 2. CLI 层测试（双机 / 双账号）
 
-依赖两台已 init 的设备，测试跨设备交互：
+依赖两个已 `login` 且加入同一团队的设备，测试跨设备交互（目标在当前团队内解析）：
 
 | 场景 | 命令 | 验证 |
 |------|------|------|
+| 登录 + 选团队 | `agentlink login` / `agentlink team use` | 保存设备会话 + current_team |
 | 心跳 | `agentlink ping` | 状态变 online |
-| 设备列表 | `agentlink list --all` | 显示两个设备 |
+| 团队 agent 列表 | `agentlink list --all` | 显示两个设备 |
 | 发消息（A→B） | `agentlink send` | 状态面板显示 |
 | 拉消息（B） | `agentlink pull` | 收到消息 + 显示 ID |
-| 消息状态查询 | `agentlink message status` | pending → delivered |
 | 发任务（A→B） | `agentlink task send` | 返回 task_id |
 | 任务状态（A） | `agentlink task status` | issued → in_progress |
 | 完成任务（B） | `agentlink task result` | completed |
 | 取消任务 | `agentlink task cancel` | cancelled |
 | 活跃任务列表 | `agentlink task list` | 只显示活跃的 |
+| 目录同步（A→B） | `agentlink sync <project> <dir>` | 秒级同步 + 文件锁串行写入 |
 
 ### 3. 边界和错误场景
 
 | 场景 | 预期 |
 |------|------|
-| 无效 device name | 400 |
+| 无效 device name / session | 400 |
 | 空 content | 400 |
 | 超长 content（>3000） | 400 |
 | 不存在的 target | 404 |
 | 未认证请求 | 401 |
+| 非团队成员访问他团队路由 | 403 |
+| 跨团队引用他团队项目 | 404 |
 | 不存在的 task_id | 404 |
 | 已完成 task 再 cancel | 400 |
 
@@ -84,24 +84,25 @@
 ## 输出格式
 
 ```
-=== API: Health ===
-  PASS  200 + redis connected
+=== Health ===
+  PASS  health check returned ok
 
-=== API: Register ===
-  PASS  device 'test-integration' registered
+=== Device login ===
+  PASS  device logged in, credential received
 
-=== CLI: Send ===
-  PASS  message sent, status panel shows idle
+=== Team create ===
+  PASS  team created (tm_...)
 
-=== CLI: Message status ===
-  PASS  pending → delivered after pull
+=== Lock + apply ===
+  PASS  file lock acquired
+  PASS  file applied (committed)
 
-=== API: Error handling ===
-  PASS  empty content returns 400
+=== Logout revokes device session ===
+  PASS  revoked credential returns 401
 
-────────────────────────────────
-  12/12 passed
-────────────────────────────────
+==========================================
+ Results: 15 passed / 0 failed
+==========================================
 ```
 
 ## 实现方式

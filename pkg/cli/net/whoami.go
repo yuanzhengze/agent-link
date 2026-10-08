@@ -3,29 +3,11 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 )
 
-type taskItem struct {
-	TaskID      string `json:"task_id"`
-	Status      string `json:"status"`
-	AssignedTo  string `json:"assigned_to"`
-	IssuedBy    string `json:"issued_by"`
-	Content     string `json:"content"`
-	Result      string `json:"result,omitempty"`
-	IssuedAt    string `json:"issued_at"`
-	CompletedAt string `json:"completed_at,omitempty"`
-}
-
-type whoamiResponse struct {
-	Device        string            `json:"device"`
-	Session       string            `json:"session"`
-	Current       string            `json:"current"`
-	Inbox         map[string]int    `json:"inbox"`
-	ReceivedTasks []taskItem        `json:"received_tasks"`
-	SentTasks     []taskItem        `json:"sent_tasks"`
-}
-
+// RunWhoami prints the local account/device/session identity and the caller's
+// received/sent tasks in the active team. There is no v2 `/whoami` endpoint;
+// identity is local and tasks come from the team task list.
 func RunWhoami() error {
 	cfg, creds, err := LoadAuth()
 	if err != nil {
@@ -37,54 +19,26 @@ func RunWhoami() error {
 		return err
 	}
 
-	resp, err := APIDo(cfg, creds, "GET", "/whoami?session="+session, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error != "" {
-			return fmt.Errorf("whoami: %s", errResp.Error)
-		}
-		return fmt.Errorf("whoami: HTTP %d", resp.StatusCode)
+	fmt.Printf("You are %s@%s/%s\n", cfg.Username, cfg.Device, session)
+	if cfg.CurrentTeam != "" {
+		fmt.Printf("Team: %s\n", cfg.CurrentTeam)
+	} else {
+		fmt.Println("Team: (none selected — run agentlink team use <team_id>)")
 	}
 
-	var w whoamiResponse
-	json.NewDecoder(resp.Body).Decode(&w)
-
-	fmt.Printf("You are %s:%s\n", w.Device, w.Session)
-	fmt.Printf("Current: %s\n", w.Current)
-	fmt.Printf("Inbox: %d received, %d sent\n", w.Inbox["received"], w.Inbox["sent"])
-
-	if len(w.ReceivedTasks) > 0 {
-		fmt.Printf("\nReceived tasks:\n")
-		for _, t := range w.ReceivedTasks {
-			extra := ""
-			if t.CompletedAt != "" {
-				extra += " (completed)"
+	if cfg.CurrentTeam != "" {
+		path, err := TeamPath(cfg, "/tasks")
+		if err == nil {
+			if resp, err := APIDoWithSession(cfg, creds, session, "GET", path, nil); err == nil {
+				defer resp.Body.Close()
+				var result struct {
+					Received []taskItem `json:"received"`
+					Sent     []taskItem `json:"sent"`
+				}
+				json.NewDecoder(resp.Body).Decode(&result)
+				printWhoamiTasks("Received tasks", result.Received)
+				printWhoamiTasks("Sent tasks", result.Sent)
 			}
-			if t.Result != "" {
-				extra += " → " + t.Result
-			}
-			fmt.Printf("  %-12s  %-15s  %s%s\n", t.TaskID, t.Status, t.Content, extra)
-		}
-	}
-
-	if len(w.SentTasks) > 0 {
-		fmt.Printf("\nSent tasks:\n")
-		for _, t := range w.SentTasks {
-			target := t.AssignedTo
-			extra := ""
-			if t.CompletedAt != "" {
-				extra += " (completed)"
-			}
-			if t.Result != "" {
-				extra += " → " + t.Result
-			}
-			fmt.Printf("  %-12s  %-15s  %s%s  → %s\n", t.TaskID, t.Status, t.Content, extra, target)
 		}
 	}
 
@@ -99,9 +53,26 @@ func RunWhoami() error {
 	fmt.Println("  agentlink task list                                  — full task list")
 	fmt.Println("  agentlink session add <name>                         — create new agent session")
 	fmt.Println("  agentlink session remove <name>                      — remove agent session")
-	fmt.Println("  agentlink list --all                                 — team devices")
+	fmt.Println("  agentlink list                                       — team devices")
 	fmt.Println("  agentlink send [--interrupt] <target> \"<msg>\"       — send msg (no reply)")
 	fmt.Println()
 	fmt.Println("User-only (do NOT run): init, install, uninstall, restart, attach")
 	return nil
+}
+
+func printWhoamiTasks(label string, items []taskItem) {
+	if len(items) == 0 {
+		return
+	}
+	fmt.Printf("\n%s:\n", label)
+	for _, t := range items {
+		extra := ""
+		if t.CompletedAt != "" {
+			extra += " (completed)"
+		}
+		if t.Result != "" {
+			extra += " → " + t.Result
+		}
+		fmt.Printf("  %-12s  %-15s  %s%s\n", t.TaskID, t.Status, t.Content, extra)
+	}
 }

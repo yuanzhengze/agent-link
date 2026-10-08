@@ -1,5 +1,12 @@
 # 协同原型平台（cowork）实现计划
 
+> ⚠️ **已被取代（historical record）：** 本实现计划针对的是**旧版 v1**（共享注册
+> 密码 + API key + Bearer Token），仅作历史留存，**不再是有效的认证/部署说明**。
+> 当前认证与团队模型请以
+> [docs/superpowers/specs/2026-07-15-team-auth-design.md](superpowers/specs/2026-07-15-team-auth-design.md)
+> 为准，部署与运维见 [docs/deploy-server.md](deploy-server.md)、
+> [docs/team-auth-operations.md](team-auth-operations.md)。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 按任务逐个实现。步骤用 `- [ ]` 复选框跟踪。
 
 **Goal:** 在 agentlink 之上增加"项目 + 文件锁 + 同步 + 预览 + GUI"协同层，让多 PM 在同一静态 HTML 原型上秒级同步、且 Agent 按文件串行写入不互相覆盖。
@@ -149,6 +156,9 @@ local exp = tonumber(redis.call('HGET', KEYS[1], 'lease_expires_at') or '0')
 if cur and cur ~= ARGV[1] and exp > tonumber(ARGV[2]) then
   return {0, cur}                      -- 被别人持有且未过期
 end
+if cur and cur ~= ARGV[1] then
+  redis.call('SREM', 'agentlink:locks:' .. cur, ARGV[4])  -- 过期回收：从旧 owner 集合移除
+end
 redis.call('HSET', KEYS[1], 'owner', ARGV[1], 'acquired_at', ARGV[2],
   'lease_expires_at', ARGV[3], 'task_id', ARGV[5])
 redis.call('SADD', KEYS[2], ARGV[4])
@@ -161,7 +171,7 @@ return {1, ARGV[1]}                     -- 授予（新建/续租/过期回收�
 local cur = redis.call('HGET', KEYS[1], 'owner')
 if cur == false then return {1, ''} end
 if cur ~= ARGV[1] and ARGV[3] ~= '1' then return {0, cur} end
-redis.call('DEL', KEYS[1]); redis.call('SREM', KEYS[2], ARGV[2])
+redis.call('DEL', KEYS[1]); redis.call('SREM', 'agentlink:locks:' .. cur, ARGV[2])  -- 用真实持有者 cur（force 场景 ≠ 调用者）
 return {1, ''}
 ```
 
