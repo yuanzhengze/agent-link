@@ -228,9 +228,9 @@
     var canRotate = currentTeam.role === "owner" || currentTeam.role === "admin";
     el.btnRotateInvite.classList.toggle("hidden", !canRotate);
     if (currentTeam.role === "owner") {
-      el.btnLeaveTeam.textContent = "Transfer ownership before leaving";
+      el.btnLeaveTeam.textContent = "离开前请先转让所有权";
     } else {
-      el.btnLeaveTeam.textContent = "Leave team";
+      el.btnLeaveTeam.textContent = "离开团队";
     }
     el.membersModal.classList.remove("hidden");
     loadMembers();
@@ -243,7 +243,7 @@
   function loadMembers() {
     return api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/members").then(function (res) {
       if (!res.ok) {
-        showMembersError((res.body && res.body.error) || ("Failed to load members (" + res.status + ")"));
+        showMembersError((res.body && res.body.error) || ("加载成员失败（" + res.status + "）"));
         return;
       }
       renderMembers((res.body && res.body.members) || []);
@@ -279,16 +279,16 @@
 
     if (currentRole === "owner") {
       if (member.role === "member") {
-        actions.appendChild(actionButton("Make admin", function () { changeRole(member, "admin"); }));
+        actions.appendChild(actionButton("设为管理员", function () { changeRole(member, "admin"); }));
       } else if (member.role === "admin") {
-        actions.appendChild(actionButton("Make member", function () { changeRole(member, "member"); }));
+        actions.appendChild(actionButton("设为成员", function () { changeRole(member, "member"); }));
       }
       if (member.role !== "owner") {
-        actions.appendChild(actionButton("Remove", function () { removeMember(member); }, "btn-danger"));
-        actions.appendChild(actionButton("Transfer ownership", function () { transferOwner(member); }));
+        actions.appendChild(actionButton("移除", function () { removeMember(member); }, "btn-danger"));
+        actions.appendChild(actionButton("转让所有权", function () { transferOwner(member); }));
       }
     } else if (currentRole === "admin" && member.role === "member") {
-      actions.appendChild(actionButton("Remove", function () { removeMember(member); }, "btn-danger"));
+      actions.appendChild(actionButton("移除", function () { removeMember(member); }, "btn-danger"));
     }
 
     if (actions.children.length > 0) row.appendChild(actions);
@@ -311,14 +311,14 @@
   }
 
   function removeMember(member) {
-    if (!window.confirm("Remove " + member.username + " from the team?")) return;
+    if (!window.confirm("确认移除 " + member.username + "？")) return;
     api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/members/" + encodeURIComponent(member.user_id), {
       method: "DELETE"
     }).then(afterMemberMutation);
   }
 
   function transferOwner(member) {
-    if (!window.confirm("Transfer ownership to " + member.username + "? You will become an admin.")) return;
+    if (!window.confirm("确认转让给 " + member.username + "？你将成为管理员。")) return;
     api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/transfer-owner", {
       method: "POST",
       body: JSON.stringify({ user_id: member.user_id })
@@ -326,7 +326,7 @@
       if (res.ok) {
         load().then(loadMembers);
       } else {
-        showMembersError((res.body && res.body.error) || ("Transfer failed (" + res.status + ")"));
+        showMembersError((res.body && res.body.error) || ("操作失败（" + res.status + "）"));
       }
     });
   }
@@ -338,17 +338,17 @@
       if (res.ok && res.body && res.body.invite_code) {
         showInviteModal(currentTeam.id, res.body.invite_code);
       } else {
-        showMembersError((res.body && res.body.error) || ("Rotate failed (" + res.status + ")"));
+        showMembersError((res.body && res.body.error) || ("操作失败（" + res.status + "）"));
       }
     });
   }
 
   function leaveTeam() {
     if (currentTeam.role === "owner") {
-      showMembersError("Transfer ownership before leaving the team.");
+      showMembersError("离开前请先转让所有权");
       return;
     }
-    if (!window.confirm("Leave " + currentTeam.name + "?")) return;
+    if (!window.confirm("确认离开 " + currentTeam.name + "？")) return;
     api.request("/api/teams/" + encodeURIComponent(currentTeam.id) + "/leave", {
       method: "POST"
     }).then(function (res) {
@@ -357,7 +357,7 @@
         hideMembers();
         load();
       } else {
-        showMembersError((res.body && res.body.error) || ("Leave failed (" + res.status + ")"));
+        showMembersError((res.body && res.body.error) || ("操作失败（" + res.status + "）"));
       }
     });
   }
@@ -366,7 +366,7 @@
     if (res.ok) {
       loadMembers();
     } else {
-      showMembersError((res.body && res.body.error) || ("Action failed (" + res.status + ")"));
+      showMembersError((res.body && res.body.error) || ("操作失败（" + res.status + "）"));
     }
   }
 
